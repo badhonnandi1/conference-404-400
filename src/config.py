@@ -39,6 +39,7 @@ class PathsConfig:
     sampled_frames: Path
     metadata: Path
     manifests: Path
+    resnet_features: Path
     logs: Path
 
 
@@ -50,11 +51,32 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class ResNetFeatureConfig:
+    """Configuration for ResNet frame feature extraction."""
+
+    architecture: str
+    weights: str
+    embedding_dimension: int
+    batch_size: int
+    normalize_frame_embeddings: bool
+    segment_aggregation: tuple[str, ...]
+    device: str
+
+
+@dataclass(frozen=True)
+class FeaturesConfig:
+    """Feature extraction configuration values."""
+
+    resnet: ResNetFeatureConfig
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Complete application configuration."""
 
     project: ProjectConfig
     video: VideoConfig
+    features: FeaturesConfig
     paths: PathsConfig
     logging: LoggingConfig
     project_root: Path
@@ -99,6 +121,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     config = _require_mapping(raw, "root")
     project = _require_mapping(config.get("project"), "project")
     video = _require_mapping(config.get("video"), "video")
+    features = _require_mapping(config.get("features", {}), "features")
+    resnet = _require_mapping(features.get("resnet", {}), "features.resnet")
     paths = _require_mapping(config.get("paths"), "paths")
     logging = _require_mapping(config.get("logging"), "logging")
 
@@ -118,12 +142,33 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         raise ConfigurationError("video.incomplete_segment_policy must be 'discard' or 'keep'.")
 
     try:
+        batch_size = int(resnet.get("batch_size", 8))
+        embedding_dimension = int(resnet.get("embedding_dimension", 512))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("ResNet batch size and embedding dimension must be integers.") from exc
+    if batch_size <= 0:
+        raise ConfigurationError("features.resnet.batch_size must be greater than zero.")
+    if embedding_dimension <= 0:
+        raise ConfigurationError("features.resnet.embedding_dimension must be greater than zero.")
+
+    aggregation = resnet.get("segment_aggregation", ["mean", "standard_deviation"])
+    if not isinstance(aggregation, list) or not all(isinstance(item, str) for item in aggregation):
+        raise ConfigurationError("features.resnet.segment_aggregation must be a list of strings.")
+
+    feature_device = str(resnet.get("device", "auto")).lower()
+    if feature_device not in {"auto", "cpu", "mps"}:
+        raise ConfigurationError("features.resnet.device must be 'auto', 'cpu', or 'mps'.")
+
+    try:
         paths_config = PathsConfig(
             originals=_resolve_project_path(project_root, str(paths["originals"])),
             segments=_resolve_project_path(project_root, str(paths["segments"])),
             sampled_frames=_resolve_project_path(project_root, str(paths["sampled_frames"])),
             metadata=_resolve_project_path(project_root, str(paths["metadata"])),
             manifests=_resolve_project_path(project_root, str(paths["manifests"])),
+            resnet_features=_resolve_project_path(
+                project_root, str(paths.get("resnet_features", "data/features/resnet"))
+            ),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
     except KeyError as exc:
@@ -138,6 +183,17 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             segment_duration_seconds=segment_duration,
             sample_frames_per_second=sample_fps,
             incomplete_segment_policy=policy,
+        ),
+        features=FeaturesConfig(
+            resnet=ResNetFeatureConfig(
+                architecture=str(resnet.get("architecture", "resnet18")),
+                weights=str(resnet.get("weights", "DEFAULT")),
+                embedding_dimension=embedding_dimension,
+                batch_size=batch_size,
+                normalize_frame_embeddings=bool(resnet.get("normalize_frame_embeddings", True)),
+                segment_aggregation=tuple(item.lower() for item in aggregation),
+                device=feature_device,
+            )
         ),
         paths=paths_config,
         logging=LoggingConfig(level=str(logging.get("level", "INFO")).upper()),
@@ -189,6 +245,7 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.sampled_frames,
         config.paths.metadata,
         config.paths.manifests,
+        config.paths.resnet_features,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

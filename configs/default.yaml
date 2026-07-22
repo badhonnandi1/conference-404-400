@@ -7,12 +7,25 @@ video:
   sample_frames_per_second: 1
   incomplete_segment_policy: discard
 
+features:
+  resnet:
+    architecture: resnet18
+    weights: DEFAULT
+    embedding_dimension: 512
+    batch_size: 8
+    normalize_frame_embeddings: true
+    segment_aggregation:
+      - mean
+      - standard_deviation
+    device: auto
+
 paths:
   originals: data/originals
   segments: data/segments
   sampled_frames: data/sampled_frames
   metadata: data/metadata
   manifests: data/manifests
+  resnet_features: data/features/resnet
   logs: logs
 
 logging:

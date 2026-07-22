@@ -18,6 +18,11 @@ def test_generated_artifacts_are_gitignored() -> None:
         "data/sampled_frames/*",
         "data/metadata/*.json",
         "data/manifests/*.json",
+        "data/features/*",
         "data/tmp/*",
+        "*.ckpt",
+        "*.pth",
+        "*.pt",
+        ".cache/",
     }
     assert required_patterns.issubset(set(gitignore))

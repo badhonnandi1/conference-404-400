@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import platform
 import sys
+from time import perf_counter
 from typing import Sequence
 
 from src.config import (
@@ -15,6 +16,22 @@ from src.config import (
     ensure_output_directories,
     load_config,
     resolve_video_path,
+)
+from src.features.aggregation import SegmentAggregationError, aggregate_segment_embeddings
+from src.features.device import DeviceSelectionError, select_device
+from src.features.feature_storage import (
+    build_feature_cache_key,
+    build_feature_manifest,
+    ensure_can_write_features,
+    feature_output_paths,
+    save_feature_manifest,
+    save_feature_npz,
+    sha256_file,
+)
+from src.features.resnet_features import (
+    FeatureExtractionError,
+    RESNET18_DEFAULT_PREPROCESSING_DESCRIPTION,
+    extract_resnet18_frame_features,
 )
 from src.utils.ffmpeg_utils import FFmpegToolError, check_required_tools
 from src.utils.logging_utils import setup_logging
@@ -69,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("check-env", parents=[common], help="Check Python, FFmpeg, FFprobe, and OpenCV.")
     subparsers.add_parser(
+        "feature-env",
+        parents=[common],
+        help="Check torch, torchvision, and feature extraction device support.",
+    )
+    subparsers.add_parser(
         "inspect",
         parents=[common, video_common],
         help="Inspect a video and save metadata JSON.",
@@ -87,6 +109,23 @@ def build_parser() -> argparse.ArgumentParser:
         "preprocess",
         parents=[common, video_common],
         help="Run environment check, inspect, segment, and sample.",
+    )
+    extract_resnet = subparsers.add_parser(
+        "extract-resnet",
+        parents=[common],
+        help="Extract pretrained ResNet-18 frame and segment features.",
+    )
+    extract_resnet.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    extract_resnet.add_argument(
+        "--frame-manifest",
+        type=Path,
+        help="Path to a Phase 1 frame manifest. Defaults to data/manifests/<VIDEO_ID>_frames.json.",
+    )
+    extract_resnet.add_argument("--batch-size", type=int, help="Feature extraction batch size.")
+    extract_resnet.add_argument(
+        "--device",
+        choices=["auto", "cpu", "mps"],
+        help="Feature extraction device. Defaults to configuration.",
     )
     return parser
 
@@ -227,6 +266,47 @@ def run_check_env(config: AppConfig) -> int:
     return 0
 
 
+def run_feature_env(config: AppConfig, requested_device: str | None = None) -> int:
+    """Check torch, torchvision, and feature extraction device support."""
+
+    try:
+        import torch
+        import torchvision
+        from torchvision.models import ResNet18_Weights
+    except ImportError:
+        print(
+            "Feature environment check failed: torch and torchvision are required. "
+            "Run '.venv/bin/python -m pip install torch torchvision'.",
+            file=sys.stderr,
+        )
+        return 1
+
+    device_request = requested_device or config.features.resnet.device
+    try:
+        device_info = select_device(device_request)
+    except DeviceSelectionError as exc:
+        print(f"Feature environment check failed: {exc}", file=sys.stderr)
+        return 1
+
+    device = torch.device(device_info.selected_device)
+    tensor = torch.arange(4, dtype=torch.float32, device=device)
+    tensor_result = float((tensor * tensor).sum().cpu())
+    weights = ResNet18_Weights.DEFAULT
+
+    print(f"Python: {platform.python_version()} ({sys.executable})")
+    print(f"torch: {torch.__version__}")
+    print(f"torchvision: {torchvision.__version__}")
+    print(f"Architecture: {platform.machine()}")
+    print(f"MPS built: {device_info.mps_built}")
+    print(f"MPS available: {device_info.mps_available}")
+    print(f"Selected device: {device_info.selected_device}")
+    print(f"Tensor verification result: {tensor_result}")
+    print(f"Model architecture: {config.features.resnet.architecture}")
+    print(f"Model weights: {weights.name}")
+    print("Model weights availability: torchvision metadata available; weights download occurs on first model load.")
+    return 0
+
+
 def command_inspect(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the inspect command."""
 
@@ -285,6 +365,111 @@ def command_sample(args: argparse.Namespace, config: AppConfig) -> int:
     return 0 if failure_count == 0 else 1
 
 
+def command_extract_resnet(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle pretrained ResNet-18 feature extraction."""
+
+    logger = setup_logging(config.paths.logs, config.logging.level, args.verbose)
+    video_id = safe_video_id(args.video_id)
+    resnet_config = config.features.resnet
+    if resnet_config.architecture != "resnet18":
+        raise FeatureExtractionError("Phase 2 supports only features.resnet.architecture='resnet18'.")
+    if resnet_config.weights != "DEFAULT":
+        raise FeatureExtractionError("Phase 2 supports only features.resnet.weights='DEFAULT'.")
+
+    frame_manifest_path = (
+        resolve_video_path(args.frame_manifest, config.project_root)
+        if args.frame_manifest
+        else config.paths.manifests / f"{video_id}_frames.json"
+    )
+    if not frame_manifest_path.exists():
+        raise FeatureExtractionError(
+            f"Frame manifest not found: {frame_manifest_path}. Run Phase 1 sampling first."
+        )
+
+    segment_manifest_path = config.paths.manifests / f"{video_id}_segments.json"
+    batch_size = args.batch_size or resnet_config.batch_size
+    if batch_size <= 0:
+        raise FeatureExtractionError("--batch-size must be greater than zero.")
+    device_request = args.device or resnet_config.device
+    source_checksum = sha256_file(frame_manifest_path)
+    outputs = feature_output_paths(config.paths.resnet_features, video_id)
+    cache_key = build_feature_cache_key(
+        source_frame_manifest_sha256=source_checksum,
+        architecture=resnet_config.architecture,
+        weight_identifier=resnet_config.weights,
+        preprocessing_description=RESNET18_DEFAULT_PREPROCESSING_DESCRIPTION,
+        normalize_frame_embeddings=resnet_config.normalize_frame_embeddings,
+        embedding_dimension=resnet_config.embedding_dimension,
+    )
+    if ensure_can_write_features(outputs, args.overwrite, cache_key):
+        print(f"Reusing cached ResNet features: {outputs.npz_path}")
+        print(f"Feature manifest: {outputs.manifest_path}")
+        return 0
+
+    started = perf_counter()
+    video_id_from_manifest, bundle, device_info, frame_result, source_frame_failures = (
+        extract_resnet18_frame_features(
+            frame_manifest_path=frame_manifest_path,
+            batch_size=batch_size,
+            requested_device=device_request,
+            normalize=resnet_config.normalize_frame_embeddings,
+            expected_dimension=resnet_config.embedding_dimension,
+            model_cache_dir=config.paths.resnet_features / "_model_cache",
+        )
+    )
+    if video_id_from_manifest != video_id:
+        raise FeatureExtractionError(
+            f"Frame manifest video_id '{video_id_from_manifest}' does not match requested '{video_id}'."
+        )
+
+    segment_result = aggregate_segment_embeddings(
+        frame_embeddings=frame_result.embeddings,
+        frame_records=frame_result.records,
+        segment_manifest_path=segment_manifest_path if segment_manifest_path.exists() else None,
+        expected_dimension=resnet_config.embedding_dimension,
+    )
+    save_feature_npz(outputs, frame_result, segment_result, overwrite=args.overwrite)
+    npz_checksum = sha256_file(outputs.npz_path)
+    total_time = perf_counter() - started
+    manifest = build_feature_manifest(
+        video_id=video_id,
+        source_frame_manifest_path=frame_manifest_path,
+        source_frame_manifest_sha256=source_checksum,
+        npz_sha256=npz_checksum,
+        paths=outputs,
+        bundle=bundle,
+        device_info=device_info,
+        batch_size=batch_size,
+        normalize_frame_embeddings=resnet_config.normalize_frame_embeddings,
+        frame_result=frame_result,
+        segment_result=segment_result,
+        total_processing_time_seconds=total_time,
+        source_frame_failures=source_frame_failures,
+    )
+    manifest.update(cache_key)
+    save_feature_manifest(manifest, outputs, overwrite=args.overwrite)
+
+    frame_successes = sum(1 for record in frame_result.records if record.extraction_success)
+    frame_failures = len(frame_result.records) - frame_successes
+    logger.info(
+        "Extracted ResNet features for %s: frames=%s segments=%s device=%s",
+        video_id,
+        frame_successes,
+        len(segment_result.records),
+        device_info.selected_device,
+    )
+    print(f"Saved ResNet feature NPZ: {outputs.npz_path}")
+    print(f"Saved ResNet feature manifest: {outputs.manifest_path}")
+    print(f"Device: {device_info.selected_device}")
+    print(f"Frame embeddings: {frame_result.embeddings.shape}")
+    print(f"Segment mean embeddings: {segment_result.mean_embeddings.shape}")
+    print(f"Segment standard-deviation embeddings: {segment_result.std_embeddings.shape}")
+    print(f"Segment combined embeddings: {segment_result.combined_embeddings.shape}")
+    print(f"Frame extraction failures: {frame_failures}")
+    print(f"Total processing time: {total_time:.3f} seconds")
+    return 0 if frame_failures == 0 else 1
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -340,6 +525,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = _load_runtime_config(args)
         if args.command == "check-env":
             return run_check_env(config)
+        if args.command == "feature-env":
+            return run_feature_env(config)
 
         setup_logging(config.paths.logs, config.logging.level, args.verbose)
         if args.command == "inspect":
@@ -350,9 +537,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_sample(args, config)
         if args.command == "preprocess":
             return command_preprocess(args, config)
+        if args.command == "extract-resnet":
+            return command_extract_resnet(args, config)
     except (
         ConfigurationError,
+        DeviceSelectionError,
+        FeatureExtractionError,
         FFmpegToolError,
+        SegmentAggregationError,
         VideoMetadataError,
         FrameSamplingError,
         MissingVideoError,

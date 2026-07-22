@@ -1,6 +1,6 @@
 # Compression-Resilient Cryptographic Authentication for Secure Surveillance Video Integrity
 
-This repository contains the first implementation stage of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, and sampling deterministic frames from each complete segment.
+This repository contains the first two implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, and extracting pretrained ResNet-18 frame and segment features.
 
 ## Current Scope
 
@@ -13,13 +13,16 @@ Implemented in this phase:
 - Default discard policy for final incomplete segments.
 - OpenCV frame sampling at one frame per second.
 - JSON manifests for metadata, segments, and sampled frames.
+- Pretrained torchvision ResNet-18 frame feature extraction.
+- Segment-level mean and standard-deviation feature aggregation.
+- Compressed NumPy feature storage and JSON feature manifests.
+- Apple Silicon MPS selection with CPU fallback.
 - Argparse command-line interface.
-- Unit tests for deterministic preprocessing helpers.
+- Unit tests for deterministic preprocessing and feature helpers.
 
 Not implemented yet:
 
-- ResNet-18 feature extraction.
-- Temporal differences, optical flow, or learned features.
+- Temporal differences, optical flow, or temporal learned features.
 - Quantization into binary digests.
 - Perceptual hashes or SHA-256 baselines.
 - HMAC protection.
@@ -67,6 +70,12 @@ video-authentication/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── features/
+│   │   ├── __init__.py
+│   │   ├── aggregation.py
+│   │   ├── device.py
+│   │   ├── feature_storage.py
+│   │   └── resnet_features.py
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── logging_utils.py
@@ -78,7 +87,11 @@ video-authentication/
 │       └── frame_sampling.py
 ├── tests/
 │   ├── __init__.py
+│   ├── test_feature_aggregation.py
+│   ├── test_feature_storage.py
 │   ├── test_metadata.py
+│   ├── test_repository_hygiene.py
+│   ├── test_resnet_features.py
 │   ├── test_segmentation.py
 │   └── test_frame_sampling.py
 ├── .gitignore
@@ -98,6 +111,11 @@ Defaults:
 - Final incomplete segment policy: `discard`.
 - Output paths under `data/`.
 - Logs under `logs/`.
+- ResNet-18 architecture with `ResNet18_Weights.DEFAULT`.
+- Frame embedding dimension: `512`.
+- Segment representations: mean `512`, standard deviation `512`, combined `1024`.
+- Frame embeddings are L2-normalized by default.
+- Feature device: `auto`, choosing MPS when available and CPU otherwise.
 
 ## CLI Commands
 
@@ -141,6 +159,31 @@ python main.py preprocess \
   --video-id V001
 ```
 
+Check the feature extraction environment:
+
+```bash
+python main.py feature-env
+```
+
+Extract ResNet-18 features from a Phase 1 frame manifest:
+
+```bash
+python main.py extract-resnet \
+  --video-id V001 \
+  --overwrite
+```
+
+Use explicit feature extraction options:
+
+```bash
+python main.py extract-resnet \
+  --video-id V001 \
+  --frame-manifest data/manifests/V001_frames.json \
+  --batch-size 8 \
+  --device auto \
+  --overwrite
+```
+
 Optional arguments:
 
 ```bash
@@ -150,6 +193,15 @@ Optional arguments:
 --keep-incomplete-segment
 --overwrite
 --verbose
+```
+
+ResNet-specific options:
+
+```bash
+--batch-size 8
+--device auto
+--device cpu
+--device mps
 ```
 
 ## Example Workflow
@@ -210,6 +262,42 @@ Frame filenames are deterministic. Example:
 V001_segment_000_frame_000_t0000500ms.jpg
 ```
 
+ResNet feature arrays:
+
+```text
+data/features/resnet/V001/V001_resnet_features.npz
+```
+
+ResNet feature manifest:
+
+```text
+data/features/resnet/V001/V001_resnet_manifest.json
+```
+
+The NPZ contains:
+
+- `frame_embeddings`: one 512-dimensional vector per sampled frame.
+- `frame_segment_ids`, `frame_indices`, `frame_requested_timestamps`, `frame_actual_timestamps`.
+- `segment_ids`.
+- `segment_mean_embeddings`: one 512-dimensional mean vector per segment.
+- `segment_std_embeddings`: one 512-dimensional population-standard-deviation vector per segment.
+- `segment_combined_embeddings`: concatenated mean and standard-deviation vectors with 1024 dimensions.
+
+The JSON feature manifest records source checksums, torch/torchvision versions, preprocessing details, selected device, timing, frame records, segment records, output checksum, warnings, and failures. Full embedding arrays are intentionally stored only in the NPZ, not JSON.
+
+## ResNet-18 Feature Extraction
+
+Phase 2 uses `torchvision.models.resnet18` with `ResNet18_Weights.DEFAULT`. The final fully connected classification layer is replaced with an identity layer so the model returns the 512-dimensional representation after global average pooling instead of ImageNet class logits.
+
+The preprocessing transform comes from the selected torchvision weights and includes RGB conversion, resize, center crop, tensor conversion, and ImageNet normalization. Original sampled JPEG files are never resized, overwritten, or otherwise modified.
+
+Device selection order is:
+
+1. MPS when available.
+2. CPU otherwise.
+
+CUDA-specific code is intentionally not used.
+
 ## Testing
 
 Run unit tests:
@@ -224,6 +312,12 @@ Run the environment check:
 python main.py check-env
 ```
 
+Run the feature environment check:
+
+```bash
+python main.py feature-env
+```
+
 Optional integration flow:
 
 ```bash
@@ -236,6 +330,7 @@ python main.py inspect --video data/originals/synthetic_6s.mp4 --video-id V001 -
 python main.py segment --video data/originals/synthetic_6s.mp4 --video-id V001 --overwrite
 python main.py sample --video data/originals/synthetic_6s.mp4 --video-id V001 --overwrite
 python main.py preprocess --video data/originals/synthetic_6s.mp4 --video-id V001 --overwrite
+python main.py extract-resnet --video-id V001 --overwrite
 ```
 
 Remove temporary integration artefacts when finished:
@@ -243,6 +338,7 @@ Remove temporary integration artefacts when finished:
 ```bash
 rm -f data/originals/synthetic_6s.mp4
 rm -rf data/sampled_frames/V001
+rm -rf data/features/resnet/V001
 rm -f data/metadata/V001_metadata.json data/manifests/V001_segments.json data/manifests/V001_frames.json
 ```
 
@@ -270,11 +366,24 @@ Frame sampling fails:
 - Try a standard MP4/H.264 test file.
 - Use `--overwrite` when re-running commands with the same video ID.
 
+ResNet extraction fails:
+
+- Confirm `torch` and `torchvision` are installed in the active environment.
+- Run `python main.py feature-env`.
+- Confirm the Phase 1 frame manifest exists and references readable JPEG files.
+- The first ResNet run may need network access to download pretrained weights.
+- Downloaded weights are cached under ignored `data/features/resnet/_model_cache/`.
+
 ## Reproducibility Notes
 
 - Video IDs are deterministic when generated from filenames.
 - Segment boundaries are timestamp-based and non-overlapping.
 - The default policy discards incomplete final segments and records discarded duration.
 - Sample timestamps are deterministic midpoints of fixed sampling intervals.
+- Frame feature records are sorted by segment ID, requested timestamp, and frame index.
+- ResNet frame embeddings are L2-normalized by default with zero-norm protection.
+- Segment standard deviation uses population standard deviation.
+- Feature NPZ and source frame manifests are checksummed for cache bookkeeping only.
 - JSON outputs use UTF-8 and stable indentation for reviewability.
-- No research dataset, generated videos, sampled frames, or logs should be committed.
+- No research dataset, generated videos, sampled frames, feature arrays, model cache files, or logs should be committed.
+- Compression robustness, quantization, HMAC authentication, and verification remain future phases.

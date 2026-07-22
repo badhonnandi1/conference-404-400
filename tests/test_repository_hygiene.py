@@ -19,6 +19,8 @@ def test_generated_artifacts_are_gitignored() -> None:
         "data/metadata/*.json",
         "data/manifests/*.json",
         "data/features/*",
+        "data/features/temporal/",
+        "data/features/resnet/_model_cache/",
         "data/tmp/*",
         "*.ckpt",
         "*.pth",

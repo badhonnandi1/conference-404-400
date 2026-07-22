@@ -40,6 +40,7 @@ class PathsConfig:
     metadata: Path
     manifests: Path
     resnet_features: Path
+    temporal_features: Path
     logs: Path
 
 
@@ -68,6 +69,20 @@ class FeaturesConfig:
     """Feature extraction configuration values."""
 
     resnet: ResNetFeatureConfig
+    temporal: "TemporalFeatureConfig"
+
+
+@dataclass(frozen=True)
+class TemporalFeatureConfig:
+    """Configuration for temporal consistency feature extraction."""
+
+    sample_fps: float
+    frame_width: int
+    frame_height: int
+    grayscale: bool
+    gaussian_blur_kernel: int
+    changed_pixel_threshold: float
+    segment_aggregation: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     video = _require_mapping(config.get("video"), "video")
     features = _require_mapping(config.get("features", {}), "features")
     resnet = _require_mapping(features.get("resnet", {}), "features.resnet")
+    temporal = _require_mapping(features.get("temporal", {}), "features.temporal")
     paths = _require_mapping(config.get("paths"), "paths")
     logging = _require_mapping(config.get("logging"), "logging")
 
@@ -160,6 +176,28 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         raise ConfigurationError("features.resnet.device must be 'auto', 'cpu', or 'mps'.")
 
     try:
+        temporal_sample_fps = float(temporal.get("sample_fps", 4))
+        temporal_width = int(temporal.get("frame_width", 224))
+        temporal_height = int(temporal.get("frame_height", 224))
+        temporal_blur = int(temporal.get("gaussian_blur_kernel", 3))
+        changed_pixel_threshold = float(temporal.get("changed_pixel_threshold", 20))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("Temporal feature numeric settings are invalid.") from exc
+    if temporal_sample_fps <= 0:
+        raise ConfigurationError("features.temporal.sample_fps must be greater than zero.")
+    if temporal_width <= 0 or temporal_height <= 0:
+        raise ConfigurationError("features.temporal frame dimensions must be greater than zero.")
+    if temporal_blur < 0 or temporal_blur % 2 == 0:
+        raise ConfigurationError("features.temporal.gaussian_blur_kernel must be zero or an odd positive integer.")
+    if changed_pixel_threshold < 0:
+        raise ConfigurationError("features.temporal.changed_pixel_threshold must be non-negative.")
+    temporal_aggregation = temporal.get("segment_aggregation", ["mean", "standard_deviation", "maximum"])
+    if not isinstance(temporal_aggregation, list) or not all(
+        isinstance(item, str) for item in temporal_aggregation
+    ):
+        raise ConfigurationError("features.temporal.segment_aggregation must be a list of strings.")
+
+    try:
         paths_config = PathsConfig(
             originals=_resolve_project_path(project_root, str(paths["originals"])),
             segments=_resolve_project_path(project_root, str(paths["segments"])),
@@ -168,6 +206,9 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             manifests=_resolve_project_path(project_root, str(paths["manifests"])),
             resnet_features=_resolve_project_path(
                 project_root, str(paths.get("resnet_features", "data/features/resnet"))
+            ),
+            temporal_features=_resolve_project_path(
+                project_root, str(paths.get("temporal_features", "data/features/temporal"))
             ),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
@@ -193,7 +234,16 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
                 normalize_frame_embeddings=bool(resnet.get("normalize_frame_embeddings", True)),
                 segment_aggregation=tuple(item.lower() for item in aggregation),
                 device=feature_device,
-            )
+            ),
+            temporal=TemporalFeatureConfig(
+                sample_fps=temporal_sample_fps,
+                frame_width=temporal_width,
+                frame_height=temporal_height,
+                grayscale=bool(temporal.get("grayscale", True)),
+                gaussian_blur_kernel=temporal_blur,
+                changed_pixel_threshold=changed_pixel_threshold,
+                segment_aggregation=tuple(item.lower() for item in temporal_aggregation),
+            ),
         ),
         paths=paths_config,
         logging=LoggingConfig(level=str(logging.get("level", "INFO")).upper()),
@@ -246,6 +296,7 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.metadata,
         config.paths.manifests,
         config.paths.resnet_features,
+        config.paths.temporal_features,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

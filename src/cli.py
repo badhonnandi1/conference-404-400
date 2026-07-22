@@ -33,6 +33,9 @@ from src.features.resnet_features import (
     RESNET18_DEFAULT_PREPROCESSING_DESCRIPTION,
     extract_resnet18_frame_features,
 )
+from src.features.temporal_features import TemporalFeatureError
+from src.features.temporal_sampling import TemporalSamplingConfig, TemporalSamplingError
+from src.features.temporal_storage import extract_and_store_temporal_features
 from src.utils.ffmpeg_utils import FFmpegToolError, check_required_tools
 from src.utils.logging_utils import setup_logging
 from src.video.frame_sampling import (
@@ -126,6 +129,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--device",
         choices=["auto", "cpu", "mps"],
         help="Feature extraction device. Defaults to configuration.",
+    )
+    extract_temporal = subparsers.add_parser(
+        "extract-temporal",
+        parents=[common],
+        help="Extract temporal frame-difference features for one video.",
+    )
+    extract_temporal.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    extract_temporal.add_argument(
+        "--video-path",
+        type=Path,
+        help="Path to source video. Defaults to the path stored in metadata.",
+    )
+    extract_temporal.add_argument(
+        "--segment-manifest",
+        type=Path,
+        help="Path to a Phase 1 segment manifest. Defaults to data/manifests/<VIDEO_ID>_segments.json.",
+    )
+    extract_temporal.add_argument("--frame-width", type=int, help="Temporal preprocessing width.")
+    extract_temporal.add_argument("--frame-height", type=int, help="Temporal preprocessing height.")
+    extract_temporal.add_argument(
+        "--changed-pixel-threshold",
+        type=float,
+        help="Changed-pixel threshold in 8-bit pixel units.",
+    )
+    extract_temporal_all = subparsers.add_parser(
+        "extract-temporal-all",
+        parents=[common],
+        help="Extract temporal features for all videos in the development registry.",
+    )
+    extract_temporal_all.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("data/manifests/development_originals_registry.json"),
+        help="Development originals registry JSON path.",
+    )
+    extract_temporal_all.add_argument("--frame-width", type=int, help="Temporal preprocessing width.")
+    extract_temporal_all.add_argument("--frame-height", type=int, help="Temporal preprocessing height.")
+    extract_temporal_all.add_argument(
+        "--changed-pixel-threshold",
+        type=float,
+        help="Changed-pixel threshold in 8-bit pixel units.",
     )
     return parser
 
@@ -470,6 +514,120 @@ def command_extract_resnet(args: argparse.Namespace, config: AppConfig) -> int:
     return 0 if frame_failures == 0 else 1
 
 
+def _temporal_config_from_args(args: argparse.Namespace, config: AppConfig) -> TemporalSamplingConfig:
+    temporal = config.features.temporal
+    sample_fps = args.sample_fps if getattr(args, "sample_fps", None) is not None else temporal.sample_fps
+    frame_width = args.frame_width if getattr(args, "frame_width", None) is not None else temporal.frame_width
+    frame_height = args.frame_height if getattr(args, "frame_height", None) is not None else temporal.frame_height
+    threshold = (
+        args.changed_pixel_threshold
+        if getattr(args, "changed_pixel_threshold", None) is not None
+        else temporal.changed_pixel_threshold
+    )
+    return TemporalSamplingConfig(
+        sample_fps=float(sample_fps),
+        frame_width=int(frame_width),
+        frame_height=int(frame_height),
+        grayscale=temporal.grayscale,
+        gaussian_blur_kernel=temporal.gaussian_blur_kernel,
+        changed_pixel_threshold=float(threshold),
+    )
+
+
+def _source_video_for_temporal(args: argparse.Namespace, config: AppConfig, video_id: str) -> Path:
+    if getattr(args, "video_path", None):
+        return resolve_video_path(args.video_path, config.project_root)
+    metadata_path = config.paths.metadata / f"{video_id}_metadata.json"
+    if metadata_path.exists():
+        return Path(load_metadata(metadata_path).absolute_path)
+    raise TemporalSamplingError(
+        f"Source video path not supplied and metadata was not found: {metadata_path}. "
+        "Run preprocess first or pass --video-path."
+    )
+
+
+def command_extract_temporal(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle temporal consistency feature extraction for one video."""
+
+    setup_logging(config.paths.logs, config.logging.level, args.verbose)
+    video_id = safe_video_id(args.video_id)
+    source_video_path = _source_video_for_temporal(args, config, video_id)
+    segment_manifest_path = (
+        resolve_video_path(args.segment_manifest, config.project_root)
+        if getattr(args, "segment_manifest", None)
+        else config.paths.manifests / f"{video_id}_segments.json"
+    )
+    if not segment_manifest_path.exists():
+        raise TemporalSamplingError(
+            f"Segment manifest not found: {segment_manifest_path}. Run preprocessing first."
+        )
+    temporal_config = _temporal_config_from_args(args, config)
+    result, manifest, paths, cache_reused = extract_and_store_temporal_features(
+        video_id=video_id,
+        source_video_path=source_video_path,
+        segment_manifest_path=segment_manifest_path,
+        output_root=config.paths.temporal_features,
+        config=temporal_config,
+        overwrite=args.overwrite,
+    )
+    if cache_reused:
+        print(f"Reusing cached temporal features: {paths.npz_path}")
+        print(f"Temporal manifest: {paths.manifest_path}")
+        return 0
+    assert result is not None and manifest is not None
+    successful_pairs = sum(1 for record in result.pair_records if record.success)
+    failed_pairs = len(result.pair_records) - successful_pairs
+    print(f"Saved temporal feature NPZ: {paths.npz_path}")
+    print(f"Saved temporal feature manifest: {paths.manifest_path}")
+    print(f"Temporal frames decoded: {sum(record.decoded_temporal_frame_count for record in result.segment_records)}")
+    print(f"Pair features: {result.pair_features.shape}")
+    print(f"Segment features: {result.segment_features.shape}")
+    print(f"Successful pairs: {successful_pairs}")
+    print(f"Failed pairs: {failed_pairs}")
+    print(f"Maximum-discontinuity timestamps: {result.segment_max_discontinuity_timestamps.tolist()}")
+    print(f"Total processing time: {manifest['total_processing_time_seconds']:.3f} seconds")
+    return 0 if failed_pairs == 0 else 1
+
+
+def command_extract_temporal_all(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle temporal extraction for every video in the development registry."""
+
+    registry_path = resolve_video_path(args.registry, config.project_root)
+    if not registry_path.exists():
+        raise TemporalSamplingError(f"Development registry not found: {registry_path}")
+    with registry_path.open("r", encoding="utf-8") as handle:
+        registry = __import__("json").load(handle)
+    videos = registry.get("videos", [])
+    if not isinstance(videos, list):
+        raise TemporalSamplingError(f"Registry does not contain a videos list: {registry_path}")
+
+    failures = 0
+    for record in videos:
+        video_id = safe_video_id(str(record["video_id"]))
+        source_video_path = Path(str(record["source_path"]))
+        segment_manifest_path = config.paths.manifests / f"{video_id}_segments.json"
+        temporal_config = _temporal_config_from_args(args, config)
+        result, manifest, paths, cache_reused = extract_and_store_temporal_features(
+            video_id=video_id,
+            source_video_path=source_video_path,
+            segment_manifest_path=segment_manifest_path,
+            output_root=config.paths.temporal_features,
+            config=temporal_config,
+            overwrite=args.overwrite,
+        )
+        if cache_reused:
+            print(f"{video_id}: reused cached temporal features at {paths.npz_path}")
+            continue
+        assert result is not None and manifest is not None
+        failed_pairs = sum(1 for pair_record in result.pair_records if not pair_record.success)
+        failures += 1 if failed_pairs else 0
+        print(
+            f"{video_id}: pairs={result.pair_features.shape}, segments={result.segment_features.shape}, "
+            f"failed_pairs={failed_pairs}, time={manifest['total_processing_time_seconds']:.3f}s"
+        )
+    return 0 if failures == 0 else 1
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -539,12 +697,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_preprocess(args, config)
         if args.command == "extract-resnet":
             return command_extract_resnet(args, config)
+        if args.command == "extract-temporal":
+            return command_extract_temporal(args, config)
+        if args.command == "extract-temporal-all":
+            return command_extract_temporal_all(args, config)
     except (
         ConfigurationError,
         DeviceSelectionError,
         FeatureExtractionError,
         FFmpegToolError,
         SegmentAggregationError,
+        TemporalFeatureError,
+        TemporalSamplingError,
         VideoMetadataError,
         FrameSamplingError,
         MissingVideoError,

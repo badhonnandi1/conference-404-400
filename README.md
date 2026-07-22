@@ -1,6 +1,6 @@
 # Compression-Resilient Cryptographic Authentication for Secure Surveillance Video Integrity
 
-This repository contains the first two implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, and extracting pretrained ResNet-18 frame and segment features.
+This repository contains the first three implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, and measuring lightweight temporal consistency inside each segment.
 
 ## Current Scope
 
@@ -15,6 +15,9 @@ Implemented in this phase:
 - JSON manifests for metadata, segments, and sampled frames.
 - Pretrained torchvision ResNet-18 frame feature extraction.
 - Segment-level mean and standard-deviation feature aggregation.
+- Dense temporal frame sampling at four frames per second.
+- Interpretable frame-to-frame temporal difference features.
+- Segment-level temporal mean, standard-deviation, and maximum aggregation.
 - Compressed NumPy feature storage and JSON feature manifests.
 - Apple Silicon MPS selection with CPU fallback.
 - Argparse command-line interface.
@@ -22,13 +25,15 @@ Implemented in this phase:
 
 Not implemented yet:
 
-- Temporal differences, optical flow, or temporal learned features.
+- Optical flow or temporal learned features.
+- Video compression variants.
+- Tampered-video generation.
 - Quantization into binary digests.
 - Perceptual hashes or SHA-256 baselines.
 - HMAC protection.
 - Digest comparison, thresholds, or verification.
 - Segment-level tamper decisions.
-- Tampering generation, augmentation, metrics, plots, or web interfaces.
+- Augmentation, metrics, ROC curves, plots, or web interfaces.
 
 ## Environment Setup
 
@@ -75,7 +80,10 @@ video-authentication/
 │   │   ├── aggregation.py
 │   │   ├── device.py
 │   │   ├── feature_storage.py
-│   │   └── resnet_features.py
+│   │   ├── resnet_features.py
+│   │   ├── temporal_features.py
+│   │   ├── temporal_sampling.py
+│   │   └── temporal_storage.py
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── logging_utils.py
@@ -93,6 +101,9 @@ video-authentication/
 │   ├── test_repository_hygiene.py
 │   ├── test_resnet_features.py
 │   ├── test_segmentation.py
+│   ├── test_temporal_features.py
+│   ├── test_temporal_sampling.py
+│   ├── test_temporal_storage.py
 │   └── test_frame_sampling.py
 ├── .gitignore
 ├── requirements.txt
@@ -116,6 +127,9 @@ Defaults:
 - Segment representations: mean `512`, standard deviation `512`, combined `1024`.
 - Frame embeddings are L2-normalized by default.
 - Feature device: `auto`, choosing MPS when available and CPU otherwise.
+- Temporal sampling rate: `4` frames per second.
+- Temporal preprocessing: grayscale, resize to `224x224`, `3x3` Gaussian blur, float32 `[0, 1]`.
+- Temporal segment vector: `18` values from six pair features aggregated by mean, population standard deviation, and maximum.
 
 ## CLI Commands
 
@@ -184,6 +198,36 @@ python main.py extract-resnet \
   --overwrite
 ```
 
+Extract temporal consistency features from a Phase 1 segment manifest:
+
+```bash
+python main.py extract-temporal \
+  --video-id V001 \
+  --sample-fps 4 \
+  --overwrite
+```
+
+When metadata is not available or a custom source path is needed:
+
+```bash
+python main.py extract-temporal \
+  --video-id V001 \
+  --video-path data/originals/sample.mp4 \
+  --segment-manifest data/manifests/V001_segments.json \
+  --frame-width 224 \
+  --frame-height 224 \
+  --changed-pixel-threshold 20 \
+  --overwrite
+```
+
+Run temporal extraction for the development originals registry:
+
+```bash
+python main.py extract-temporal-all \
+  --registry data/manifests/development_originals_registry.json \
+  --overwrite
+```
+
 Optional arguments:
 
 ```bash
@@ -202,6 +246,17 @@ ResNet-specific options:
 --device auto
 --device cpu
 --device mps
+```
+
+Temporal-specific options:
+
+```bash
+--video-path data/originals/sample.mp4
+--segment-manifest data/manifests/V001_segments.json
+--sample-fps 4
+--frame-width 224
+--frame-height 224
+--changed-pixel-threshold 20
 ```
 
 ## Example Workflow
@@ -285,6 +340,31 @@ The NPZ contains:
 
 The JSON feature manifest records source checksums, torch/torchvision versions, preprocessing details, selected device, timing, frame records, segment records, output checksum, warnings, and failures. Full embedding arrays are intentionally stored only in the NPZ, not JSON.
 
+Temporal feature arrays:
+
+```text
+data/features/temporal/V001/V001_temporal_features.npz
+```
+
+Temporal feature manifest:
+
+```text
+data/features/temporal/V001/V001_temporal_manifest.json
+```
+
+The temporal NPZ contains:
+
+- `pair_features`: one six-dimensional row per successful consecutive temporal frame pair.
+- `pair_segment_ids`, `pair_indices`, `pair_start_timestamps`, `pair_end_timestamps`.
+- `segment_ids`.
+- `segment_features`: one 18-dimensional temporal vector per complete segment.
+- `segment_successful_pair_counts`.
+- `segment_max_discontinuity_pair_indices`.
+- `segment_max_discontinuity_timestamps`.
+- `feature_names`: ordered segment feature names.
+
+The temporal JSON manifest records source-video and segment-manifest checksums, sampling and preprocessing configuration, pair feature definitions, ordered segment feature names, segment records, pair records, output checksum, timings, warnings, and failures. Full numerical arrays are stored in the NPZ rather than duplicated in JSON.
+
 ## ResNet-18 Feature Extraction
 
 Phase 2 uses `torchvision.models.resnet18` with `ResNet18_Weights.DEFAULT`. The final fully connected classification layer is replaced with an identity layer so the model returns the 512-dimensional representation after global average pooling instead of ImageNet class logits.
@@ -297,6 +377,30 @@ Device selection order is:
 2. CPU otherwise.
 
 CUDA-specific code is intentionally not used.
+
+## Temporal Consistency Features
+
+Phase 3 adds a second, independent feature stream for frame-to-frame consistency inside each five-second segment. It is designed to expose interpretable motion and discontinuity signals that later phases can protect cryptographically, not to make final tamper decisions by itself.
+
+Temporal sampling uses four frames per second because one frame per second is too sparse for insertion, deletion, duplication, or abrupt replacement signals. For a five-second segment this requests 20 midpoint timestamps, such as `0.125`, `0.375`, `0.625`, and so on, producing up to 19 consecutive frame pairs. Temporal frames are decoded directly from the source video and kept in memory during calculation; they are not saved as permanent JPEGs by default.
+
+Each decoded frame is preprocessed only for comparison:
+
+- Convert BGR to grayscale.
+- Resize to `224x224`.
+- Apply a light `3x3` Gaussian blur.
+- Convert to float32 values in `[0, 1]`.
+
+The six pair-level features are:
+
+- Mean absolute difference.
+- Standard deviation of absolute difference.
+- Normalized root mean squared difference.
+- Changed-pixel ratio using `changed_pixel_threshold / 255`.
+- 90th-percentile absolute difference.
+- Sobel edge-change ratio.
+
+Each complete segment aggregates those six pair features using mean, population standard deviation, and maximum. The default temporal segment vector therefore has `6 x 3 = 18` dimensions. Optical flow is intentionally not implemented yet.
 
 ## Testing
 
@@ -331,7 +435,29 @@ python main.py segment --video data/originals/synthetic_6s.mp4 --video-id V001 -
 python main.py sample --video data/originals/synthetic_6s.mp4 --video-id V001 --overwrite
 python main.py preprocess --video data/originals/synthetic_6s.mp4 --video-id V001 --overwrite
 python main.py extract-resnet --video-id V001 --overwrite
+python main.py extract-temporal --video-id V001 --overwrite
 ```
+
+Optional Phase 3 synthetic sanity checks should use temporary files under `data/tmp/`:
+
+```bash
+ffmpeg -y \
+  -f lavfi -i color=c=gray:s=320x240:r=10:d=6 \
+  -c:v libx264 \
+  -pix_fmt yuv420p \
+  data/tmp/phase3_static_6s.mp4
+
+ffmpeg -y \
+  -f lavfi -i color=c=black:s=320x240:r=10:d=3 \
+  -f lavfi -i color=c=white:s=320x240:r=10:d=3 \
+  -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[outv]" \
+  -map "[outv]" \
+  -c:v libx264 \
+  -pix_fmt yuv420p \
+  data/tmp/phase3_abrupt_6s.mp4
+```
+
+The static video should produce near-zero temporal differences. The abrupt-change video should produce its maximum discontinuity near the known transition time.
 
 Remove temporary integration artefacts when finished:
 
@@ -339,6 +465,7 @@ Remove temporary integration artefacts when finished:
 rm -f data/originals/synthetic_6s.mp4
 rm -rf data/sampled_frames/V001
 rm -rf data/features/resnet/V001
+rm -rf data/features/temporal/V001
 rm -f data/metadata/V001_metadata.json data/manifests/V001_segments.json data/manifests/V001_frames.json
 ```
 
@@ -374,6 +501,13 @@ ResNet extraction fails:
 - The first ResNet run may need network access to download pretrained weights.
 - Downloaded weights are cached under ignored `data/features/resnet/_model_cache/`.
 
+Temporal extraction fails:
+
+- Confirm the Phase 1 segment manifest exists.
+- Confirm the source video path in metadata still points to an existing readable file.
+- Confirm OpenCV can seek and decode frames from the source container.
+- Use `--overwrite` only when intentionally regenerating non-matching temporal outputs.
+
 ## Reproducibility Notes
 
 - Video IDs are deterministic when generated from filenames.
@@ -384,6 +518,9 @@ ResNet extraction fails:
 - ResNet frame embeddings are L2-normalized by default with zero-norm protection.
 - Segment standard deviation uses population standard deviation.
 - Feature NPZ and source frame manifests are checksummed for cache bookkeeping only.
+- Temporal timestamps are deterministic midpoint samples at the configured FPS.
+- Temporal pair features and segment feature names use a fixed ordered list.
+- Temporal cache reuse requires matching source checksum, segment manifest checksum, sampling rate, frame dimensions, grayscale flag, blur kernel, changed-pixel threshold, pair feature list, and aggregation list.
 - JSON outputs use UTF-8 and stable indentation for reviewability.
 - No research dataset, generated videos, sampled frames, feature arrays, model cache files, or logs should be committed.
-- Compression robustness, quantization, HMAC authentication, and verification remain future phases.
+- Compressed datasets, tampered datasets, optical flow, quantization, HMAC authentication, and verification remain future phases.

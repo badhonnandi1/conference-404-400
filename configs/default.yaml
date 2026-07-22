@@ -18,6 +18,17 @@ features:
       - mean
       - standard_deviation
     device: auto
+  temporal:
+    sample_fps: 4
+    frame_width: 224
+    frame_height: 224
+    grayscale: true
+    gaussian_blur_kernel: 3
+    changed_pixel_threshold: 20
+    segment_aggregation:
+      - mean
+      - standard_deviation
+      - maximum
 
 paths:
   originals: data/originals
@@ -26,6 +37,7 @@ paths:
   metadata: data/metadata
   manifests: data/manifests
   resnet_features: data/features/resnet
+  temporal_features: data/features/temporal
   logs: logs
 
 logging:

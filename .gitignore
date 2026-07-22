@@ -13,6 +13,8 @@ data/sampled_frames/*
 data/metadata/*.json
 data/manifests/*.json
 data/features/*
+data/features/temporal/
+data/features/resnet/_model_cache/
 data/tmp/*
 
 *.ckpt

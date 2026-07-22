@@ -1,6 +1,6 @@
 # Compression-Resilient Cryptographic Authentication for Secure Surveillance Video Integrity
 
-This repository contains the first four implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, and applying stream-specific robust normalization.
+This repository contains the first five implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, applying stream-specific robust normalization, and converting normalized features into development binary digests.
 
 ## Current Scope
 
@@ -22,6 +22,10 @@ Implemented in this phase:
 - Stream-specific robust median/IQR normalization.
 - Development calibration artifact creation and inspection.
 - Normalized ResNet, temporal, and combined feature outputs.
+- Development binary quantization artifact creation and inspection.
+- ResNet, temporal, and hybrid binary digest generation.
+- Packed-byte digest storage with padding metadata and round-trip validation.
+- Clipping diagnostics for normalized features before quantization.
 - Compressed NumPy feature storage and JSON feature manifests.
 - Apple Silicon MPS selection with CPU fallback.
 - Argparse command-line interface.
@@ -32,10 +36,9 @@ Not implemented yet:
 - Optical flow or temporal learned features.
 - Video compression variants.
 - Tampered-video generation.
-- Quantization into binary digests.
 - Perceptual hashes or SHA-256 baselines.
 - HMAC protection.
-- Digest comparison, thresholds, or verification.
+- Hamming-distance digest comparison, thresholds, or verification.
 - Segment-level tamper decisions.
 - Augmentation, metrics, ROC curves, plots, or web interfaces.
 
@@ -79,6 +82,11 @@ video-authentication/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── authentication/
+│   │   ├── __init__.py
+│   │   ├── digest.py
+│   │   ├── digest_storage.py
+│   │   └── quantization.py
 │   ├── features/
 │   │   ├── __init__.py
 │   │   ├── aggregation.py
@@ -103,6 +111,8 @@ video-authentication/
 │       └── frame_sampling.py
 ├── tests/
 │   ├── __init__.py
+│   ├── test_digest.py
+│   ├── test_digest_storage.py
 │   ├── test_feature_aggregation.py
 │   ├── test_feature_alignment.py
 │   ├── test_feature_fusion.py
@@ -110,6 +120,7 @@ video-authentication/
 │   ├── test_feature_storage.py
 │   ├── test_metadata.py
 │   ├── test_normalization_storage.py
+│   ├── test_quantization.py
 │   ├── test_repository_hygiene.py
 │   ├── test_resnet_features.py
 │   ├── test_segmentation.py
@@ -144,6 +155,11 @@ Defaults:
 - Temporal segment vector: `18` values from six pair features aggregated by mean, population standard deviation, and maximum.
 - Normalized feature output path: `data/features/normalized`.
 - Development calibration path: `data/calibration`.
+- Digest output path: `data/digests`.
+- Development quantizer version: `dev_quantizer_v1`.
+- ResNet quantization: one bit per normalized feature.
+- Temporal quantization: four bins with two-bit Gray code.
+- Hybrid digest length: `1060` bits.
 
 ## CLI Commands
 
@@ -277,6 +293,44 @@ python main.py inspect-normalization \
   --calibration-id DEV_NORMALIZATION_V1
 
 python main.py inspect-normalized-features \
+  --video-id V001
+```
+
+Create the development quantizer:
+
+```bash
+python main.py create-quantizer \
+  --normalization-id DEV_NORMALIZATION_V1 \
+  --quantization-id DEV_QUANTIZATION_V1 \
+  --status development \
+  --overwrite
+```
+
+Build one digest:
+
+```bash
+python main.py build-digest \
+  --video-id V001 \
+  --quantization-id DEV_QUANTIZATION_V1 \
+  --overwrite
+```
+
+Build digests for the development set:
+
+```bash
+python main.py build-digests \
+  --video-ids V001 V002 V003 \
+  --quantization-id DEV_QUANTIZATION_V1 \
+  --overwrite
+```
+
+Inspect quantizer and digest outputs:
+
+```bash
+python main.py inspect-quantizer \
+  --quantization-id DEV_QUANTIZATION_V1
+
+python main.py inspect-digest \
   --video-id V001
 ```
 
@@ -444,6 +498,42 @@ The normalized NPZ contains:
 
 Stream boundaries are preserved in the manifest: ResNet uses combined indices `0-1023`, and temporal features use `1024-1041`. The combined array is storage convenience only; later verification must compare streams separately before deciding weighting.
 
+Development quantization artifact:
+
+```text
+data/calibration/DEV_QUANTIZATION_V1/quantization_parameters.npz
+data/calibration/DEV_QUANTIZATION_V1/quantization_manifest.json
+```
+
+The quantization NPZ contains:
+
+- `resnet_thresholds`: 1024 one-bit thresholds.
+- `temporal_q1_thresholds`, `temporal_median_thresholds`, `temporal_q3_thresholds`: 18 thresholds each.
+- `temporal_gray_code_table`: bin-to-bit mapping.
+- `stream_boundaries`.
+- `digest_lengths`.
+
+Digest outputs:
+
+```text
+data/digests/V001/V001_digests.npz
+data/digests/V001/V001_digest_manifest.json
+```
+
+The digest NPZ contains:
+
+- `segment_ids`, `segment_start_times`, `segment_end_times`.
+- `resnet_binary_digests`: `(segments, 1024)`.
+- `temporal_bin_indices`: `(segments, 18)`.
+- `temporal_binary_digests`: `(segments, 36)`.
+- `hybrid_binary_digests`: `(segments, 1060)`.
+- `resnet_packed_digests`: `(segments, 128)`.
+- `temporal_packed_digests`: `(segments, 5)`.
+- `hybrid_packed_digests`: `(segments, 133)`.
+- `resnet_bit_length`, `temporal_bit_length`, `hybrid_bit_length`.
+
+The digest manifest records source normalized-feature checksums, calibration and quantizer checksums, digest dimensions, stream boundaries, bit order, padding counts, bit-one ratios, temporal bin distributions, clipping statistics, output checksum, warnings, and failures. Full bit arrays are intentionally stored in NPZ, not duplicated in JSON.
+
 ## ResNet-18 Feature Extraction
 
 Phase 2 uses `torchvision.models.resnet18` with `ResNet18_Weights.DEFAULT`. The final fully connected classification layer is replaced with an identity layer so the model returns the 512-dimensional representation after global average pooling instead of ImageNet class logits.
@@ -497,6 +587,43 @@ The default epsilon is `1e-8`, and normalized values are clipped to `[-5, 5]`. Z
 
 `DEV_NORMALIZATION_V1` is a development-only artifact. It was fitted using only three original videos and must be replaced before final compression-resilience or tamper-detection experiments. It is useful for validating the pipeline shape, storage, and reproducibility, not for final research claims.
 
+## Quantization and Digests
+
+Phase 5 converts normalized continuous segment features into compact binary digests. Continuous values are not directly suitable for cryptographic authentication records because tiny numeric perturbations from decoding, compression, or hardware differences can alter exact floating-point values. Quantization creates deterministic bit strings that later phases can protect and compare.
+
+ResNet quantization uses one bit per normalized feature. Each of the 1024 normalized ResNet dimensions is compared against a calibration-derived threshold. Because Phase 4 centers each fitted calibration median at zero, the development threshold vector is currently all zeros. Exact-threshold values map to bit `1`, which is deterministic and tested.
+
+Temporal quantization preserves more temporal detail by using four bins per feature. For each of the 18 normalized temporal dimensions, thresholds are derived from the saved Phase 4 calibration parameters:
+
+```text
+normalized_q1 = (q1 - median) / safe_scale
+normalized_median = 0
+normalized_q3 = (q3 - median) / safe_scale
+```
+
+Temporal bins are encoded with two-bit Gray code:
+
+```text
+Bin 0 -> 00
+Bin 1 -> 01
+Bin 2 -> 11
+Bin 3 -> 10
+```
+
+Adjacent bins differ by one bit, which is useful near bin boundaries. The temporal stream therefore produces `18 x 2 = 36` bits per segment.
+
+The hybrid digest concatenates streams in this order:
+
+```text
+[ResNet bits | Temporal bits]
+```
+
+Stream boundaries are recorded as ResNet `[0, 1024)` and temporal `[1024, 1060)`. The flat 1060-bit hybrid digest is for storage and inspection only. Later verification should compare ResNet and temporal distances separately before applying any weighting policy.
+
+Digests are packed with `numpy.packbits` using `bit_order: big`. ResNet packs to 128 bytes, temporal packs to 5 bytes with four padding bits, and hybrid packs to 133 bytes with four padding bits. The original bit length and padding-bit counts are stored so unpacking can remove padding and exactly reproduce the original bit arrays.
+
+`DEV_QUANTIZATION_V1` is development-only. It depends on `DEV_NORMALIZATION_V1`, which used only three original videos. It must be regenerated after the final calibration split is prepared. No HMAC security, Hamming-distance comparison, verification thresholds, compression-resilience result, or tamper-detection result is claimed in this phase.
+
 ## Testing
 
 Run unit tests:
@@ -533,6 +660,8 @@ python main.py extract-resnet --video-id V001 --overwrite
 python main.py extract-temporal --video-id V001 --overwrite
 python main.py fit-normalization --video-ids V001 V002 V003 --calibration-id DEV_NORMALIZATION_V1 --status development --overwrite
 python main.py normalize-features-all --video-ids V001 V002 V003 --calibration-id DEV_NORMALIZATION_V1 --overwrite
+python main.py create-quantizer --normalization-id DEV_NORMALIZATION_V1 --quantization-id DEV_QUANTIZATION_V1 --status development --overwrite
+python main.py build-digests --video-ids V001 V002 V003 --quantization-id DEV_QUANTIZATION_V1 --overwrite
 ```
 
 Optional Phase 3 synthetic sanity checks should use temporary files under `data/tmp/`:
@@ -565,6 +694,8 @@ rm -rf data/features/resnet/V001
 rm -rf data/features/temporal/V001
 rm -rf data/features/normalized/V001
 rm -rf data/calibration/DEV_NORMALIZATION_V1
+rm -rf data/calibration/DEV_QUANTIZATION_V1
+rm -rf data/digests/V001
 rm -f data/metadata/V001_metadata.json data/manifests/V001_segments.json data/manifests/V001_frames.json
 ```
 
@@ -614,6 +745,13 @@ Normalization fails:
 - Run `inspect-normalization` to confirm the calibration artifact exists.
 - Use `--overwrite` only when intentionally replacing stale normalized outputs.
 
+Digest generation fails:
+
+- Confirm normalized feature outputs exist for the video ID.
+- Confirm `DEV_QUANTIZATION_V1` exists with `inspect-quantizer`.
+- Confirm the quantizer normalization ID matches the normalized feature calibration ID.
+- Use `--overwrite` only when intentionally replacing stale digest outputs.
+
 ## Reproducibility Notes
 
 - Video IDs are deterministic when generated from filenames.
@@ -630,7 +768,12 @@ Normalization fails:
 - Alignment sorts segment IDs deterministically and rejects missing or duplicate segment IDs.
 - Normalization is fitted separately for ResNet and temporal streams.
 - Normalization cache reuse requires matching source checksums, calibration checksum, method, epsilon, clipping range, and feature dimensions.
+- ResNet digest bits use deterministic `value >= threshold` behavior.
+- Temporal digest bins use deterministic quartile boundary behavior and Gray-code encoding.
+- Packed digest round trips are validated before writing manifests.
+- Digest cache reuse requires matching normalized feature checksum, calibration checksum, quantizer checksum, quantization version, bit order, stream boundaries, and padding policy.
 - JSON outputs use UTF-8 and stable indentation for reviewability.
 - No research dataset, generated videos, sampled frames, feature arrays, model cache files, or logs should be committed.
 - The current normalization artifact uses only three original videos and must not be used for final experimental results.
-- Compressed datasets, tampered datasets, optical flow, quantization, HMAC authentication, Hamming-distance verification, threshold selection, and verification accuracy remain future phases.
+- The current quantization artifact depends on only three original videos and must be regenerated after the final calibration split is prepared.
+- Compressed datasets, tampered datasets, optical flow, HMAC authentication, Hamming-distance verification, threshold selection, and verification accuracy remain future phases.

@@ -12,6 +12,19 @@ from typing import Sequence
 
 import numpy as np
 
+from src.authentication.digest import DigestError, unpack_packed_bits
+from src.authentication.digest_storage import (
+    build_and_store_digest,
+    create_and_store_quantizer,
+    digest_output_paths,
+    load_digest_npz,
+    load_quantization_artifact,
+)
+from src.authentication.quantization import (
+    DEFAULT_QUANTIZATION_ID,
+    QUANTIZATION_WARNING,
+    QuantizationError,
+)
 from src.config import (
     AppConfig,
     ConfigurationError,
@@ -236,6 +249,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect normalized feature outputs for one video.",
     )
     inspect_normalized.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    create_quantizer = subparsers.add_parser(
+        "create-quantizer",
+        parents=[common],
+        help="Create a development quantization artifact from a normalization artifact.",
+    )
+    create_quantizer.add_argument(
+        "--normalization-id",
+        default=DEFAULT_CALIBRATION_ID,
+        help="Normalization calibration identifier.",
+    )
+    create_quantizer.add_argument(
+        "--quantization-id",
+        default=DEFAULT_QUANTIZATION_ID,
+        help="Quantization artifact identifier.",
+    )
+    create_quantizer.add_argument("--status", default="development", help="Quantization status label.")
+    build_digest = subparsers.add_parser(
+        "build-digest",
+        parents=[common],
+        help="Build binary authentication digests for one video.",
+    )
+    build_digest.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    build_digest.add_argument(
+        "--quantization-id",
+        default=DEFAULT_QUANTIZATION_ID,
+        help="Quantization artifact identifier.",
+    )
+    build_digests = subparsers.add_parser(
+        "build-digests",
+        parents=[common],
+        help="Build binary authentication digests for multiple videos.",
+    )
+    build_digests.add_argument("--video-ids", nargs="+", required=True, help="Video IDs to digest.")
+    build_digests.add_argument(
+        "--quantization-id",
+        default=DEFAULT_QUANTIZATION_ID,
+        help="Quantization artifact identifier.",
+    )
+    inspect_quantizer = subparsers.add_parser(
+        "inspect-quantizer",
+        parents=[common],
+        help="Inspect a saved quantization artifact.",
+    )
+    inspect_quantizer.add_argument(
+        "--quantization-id",
+        default=DEFAULT_QUANTIZATION_ID,
+        help="Quantization artifact identifier.",
+    )
+    inspect_digest = subparsers.add_parser(
+        "inspect-digest",
+        parents=[common],
+        help="Inspect one video's binary digest outputs.",
+    )
+    inspect_digest.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
     return parser
 
 
@@ -845,6 +912,175 @@ def command_inspect_normalized_features(args: argparse.Namespace, config: AppCon
     return 0 if finite else 1
 
 
+def command_create_quantizer(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle development quantizer creation."""
+
+    artifact = create_and_store_quantizer(
+        normalization_root=config.paths.calibration,
+        quantization_root=config.paths.calibration,
+        normalization_id=args.normalization_id,
+        quantization_id=args.quantization_id,
+        version=config.authentication.quantization.version,
+        status=args.status,
+        bit_order=config.authentication.quantization.bit_order,
+        overwrite=args.overwrite,
+    )
+    print(f"Saved quantization parameters: {artifact.paths.npz_path}")
+    print(f"Saved quantization manifest: {artifact.paths.manifest_path}")
+    print(f"Quantization ID: {artifact.quantization_id}")
+    print(f"Normalization ID: {artifact.parameters.normalization_id}")
+    print(f"Version: {artifact.parameters.version}")
+    print(f"Status: {artifact.parameters.status}")
+    print(f"Development-only: {artifact.parameters.development_only}")
+    print(f"ResNet digest length: {artifact.manifest['digest_dimensions']['resnet']}")
+    print(f"Temporal digest length: {artifact.manifest['digest_dimensions']['temporal']}")
+    print(f"Hybrid digest length: {artifact.manifest['digest_dimensions']['hybrid']}")
+    print(QUANTIZATION_WARNING)
+    return 0
+
+
+def command_build_digest(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle digest generation for one video."""
+
+    video_id = safe_video_id(args.video_id)
+    bundle, manifest, paths, cache_reused = build_and_store_digest(
+        video_id=video_id,
+        normalized_root=config.paths.normalized_features,
+        quantization_root=config.paths.calibration,
+        digest_root=config.paths.digests,
+        quantization_id=args.quantization_id,
+        overwrite=args.overwrite,
+    )
+    if cache_reused:
+        print(f"Reusing cached digest: {paths.npz_path}")
+        print(f"Digest manifest: {paths.manifest_path}")
+        return 0
+    assert bundle is not None
+    print(f"Saved digest NPZ: {paths.npz_path}")
+    print(f"Saved digest manifest: {paths.manifest_path}")
+    print(f"Video ID: {video_id}")
+    print(f"Segments: {bundle.segment_ids.shape[0]}")
+    print(f"ResNet digest: {bundle.resnet_binary_digests.shape}")
+    print(f"Temporal digest: {bundle.temporal_binary_digests.shape}")
+    print(f"Hybrid digest: {bundle.hybrid_binary_digests.shape}")
+    print(f"Packed bytes: resnet={bundle.resnet_packed_digests.shape[1]}, temporal={bundle.temporal_packed_digests.shape[1]}, hybrid={bundle.hybrid_packed_digests.shape[1]}")
+    print(f"Pack/unpack round-trip: {bundle.validate_round_trips()}")
+    print(f"Processing time: {manifest['processing_time_seconds']:.6f} seconds")
+    return 0 if bundle.validate_round_trips() else 1
+
+
+def command_build_digests(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle digest generation for multiple videos."""
+
+    failures = 0
+    for video_id in _safe_video_ids(args.video_ids):
+        bundle, manifest, paths, cache_reused = build_and_store_digest(
+            video_id=video_id,
+            normalized_root=config.paths.normalized_features,
+            quantization_root=config.paths.calibration,
+            digest_root=config.paths.digests,
+            quantization_id=args.quantization_id,
+            overwrite=args.overwrite,
+        )
+        if cache_reused:
+            print(f"{video_id}: reused cached digest at {paths.npz_path}")
+            continue
+        assert bundle is not None
+        ok = bundle.validate_round_trips()
+        failures += 0 if ok else 1
+        print(
+            f"{video_id}: resnet={bundle.resnet_binary_digests.shape}, "
+            f"temporal={bundle.temporal_binary_digests.shape}, "
+            f"hybrid={bundle.hybrid_binary_digests.shape}, "
+            f"packed=({bundle.resnet_packed_digests.shape[1]}, {bundle.temporal_packed_digests.shape[1]}, {bundle.hybrid_packed_digests.shape[1]}), "
+            f"round_trip={ok}, time={manifest['processing_time_seconds']:.6f}s"
+        )
+    return 0 if failures == 0 else 1
+
+
+def command_inspect_quantizer(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect a quantization artifact."""
+
+    artifact = load_quantization_artifact(config.paths.calibration, args.quantization_id)
+    manifest = artifact.manifest
+    print(f"Quantization ID: {artifact.quantization_id}")
+    print(f"Normalization ID: {manifest['normalization_calibration_id']}")
+    print(f"Version: {manifest['quantization_version']}")
+    print(f"Status: {manifest['status']}")
+    print(f"Development-only: {manifest['development_only']}")
+    print(f"Warning: {QUANTIZATION_WARNING}")
+    print(f"ResNet method: {manifest['resnet_quantization_method']}")
+    print(f"Temporal method: {manifest['temporal_quantization_method']}")
+    print(f"Gray-code mapping: {manifest['gray_code_mapping']}")
+    print(f"Digest dimensions: {manifest['digest_dimensions']}")
+    print(f"Stream boundaries: {manifest['stream_boundaries']}")
+    print(f"Bit order: {manifest['bit_order']}")
+    print(f"NPZ: {artifact.paths.npz_path}")
+    print(f"NPZ checksum: {artifact.npz_sha256}")
+    return 0
+
+
+def command_inspect_digest(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect one video's digest outputs."""
+
+    video_id = safe_video_id(args.video_id)
+    paths = digest_output_paths(config.paths.digests, video_id)
+    if not paths.npz_path.exists() or not paths.manifest_path.exists():
+        raise FileNotFoundError(f"Digest outputs not found for {video_id}: {paths.output_dir}")
+    with paths.manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    arrays = load_digest_npz(paths.npz_path)
+    summary = manifest["bit_statistics"]
+    resnet_bits = arrays["resnet_binary_digests"]
+    temporal_bits = arrays["temporal_binary_digests"]
+    hybrid_bits = arrays["hybrid_binary_digests"]
+    bit_order = manifest["bit_order"]
+    round_trip = (
+        np.array_equal(
+            unpack_packed_bits(arrays["resnet_packed_digests"], int(arrays["resnet_bit_length"]), bit_order),
+            resnet_bits,
+        )
+        and np.array_equal(
+            unpack_packed_bits(arrays["temporal_packed_digests"], int(arrays["temporal_bit_length"]), bit_order),
+            temporal_bits,
+        )
+        and np.array_equal(
+            unpack_packed_bits(arrays["hybrid_packed_digests"], int(arrays["hybrid_bit_length"]), bit_order),
+            hybrid_bits,
+        )
+    )
+    clipping = manifest["clipping_statistics"]
+    print(f"Video ID: {video_id}")
+    print(f"Segment count: {manifest['segment_count']}")
+    print(f"Normalization ID: {manifest['normalization_calibration_id']}")
+    print(f"Quantization ID: {manifest['quantization_id']}")
+    print(f"Development-only warning: {manifest['development_warning']}")
+    print(f"ResNet digest shape and length: {resnet_bits.shape}, {int(arrays['resnet_bit_length'])}")
+    print(f"Temporal digest shape and length: {temporal_bits.shape}, {int(arrays['temporal_bit_length'])}")
+    print(f"Hybrid digest shape and length: {hybrid_bits.shape}, {int(arrays['hybrid_bit_length'])}")
+    print(
+        "Packed byte sizes: "
+        f"resnet={arrays['resnet_packed_digests'].shape[1]}, "
+        f"temporal={arrays['temporal_packed_digests'].shape[1]}, "
+        f"hybrid={arrays['hybrid_packed_digests'].shape[1]}"
+    )
+    print(f"ResNet zero/one counts: {summary['resnet']['zero_count']}/{summary['resnet']['one_count']}")
+    print(f"Temporal zero/one counts: {summary['temporal']['zero_count']}/{summary['temporal']['one_count']}")
+    print(f"Hybrid zero/one counts: {summary['hybrid']['zero_count']}/{summary['hybrid']['one_count']}")
+    print(f"ResNet one-bit ratio: {summary['resnet']['one_ratio']:.6f}")
+    print(f"Temporal one-bit ratio: {summary['temporal']['one_ratio']:.6f}")
+    print(f"Hybrid one-bit ratio: {summary['hybrid']['one_ratio']:.6f}")
+    print(f"Temporal bin distribution: {summary['temporal_bin_distribution']}")
+    print(f"ResNet clipping percentage: {clipping['resnet']['clipping_percentage']:.6f}")
+    print(f"Temporal clipping percentage: {clipping['temporal']['clipping_percentage']:.6f}")
+    print(f"Combined clipping percentage: {clipping['combined']['clipping_percentage']:.6f}")
+    print(f"Pack/unpack validation: {round_trip}")
+    print(f"Source normalized checksum: {manifest['source_normalized_feature_sha256']}")
+    print(f"Quantizer checksum: {manifest['quantization_artifact_sha256']}")
+    print(f"Output checksum: {manifest['npz_sha256']}")
+    return 0 if round_trip else 1
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -928,14 +1164,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_inspect_normalization(args, config)
         if args.command == "inspect-normalized-features":
             return command_inspect_normalized_features(args, config)
+        if args.command == "create-quantizer":
+            return command_create_quantizer(args, config)
+        if args.command == "build-digest":
+            return command_build_digest(args, config)
+        if args.command == "build-digests":
+            return command_build_digests(args, config)
+        if args.command == "inspect-quantizer":
+            return command_inspect_quantizer(args, config)
+        if args.command == "inspect-digest":
+            return command_inspect_digest(args, config)
     except (
         ConfigurationError,
         DeviceSelectionError,
+        DigestError,
         FeatureExtractionError,
         FeatureAlignmentError,
         FeatureFusionError,
         FFmpegToolError,
         NormalizationError,
+        QuantizationError,
         SegmentAggregationError,
         TemporalFeatureError,
         TemporalSamplingError,

@@ -30,6 +30,24 @@ features:
       - standard_deviation
       - maximum
 
+authentication:
+  quantization:
+    version: dev_quantizer_v1
+    resnet:
+      method: median_binary
+      threshold_source: normalized_calibration_median
+      bits_per_feature: 1
+    temporal:
+      method: quartile_gray_code
+      bits_per_feature: 2
+      gray_codes:
+        bin_0: "00"
+        bin_1: "01"
+        bin_2: "11"
+        bin_3: "10"
+    bit_order: big
+    pack_bits: true
+
 paths:
   originals: data/originals
   segments: data/segments
@@ -40,6 +58,7 @@ paths:
   temporal_features: data/features/temporal
   normalized_features: data/features/normalized
   calibration: data/calibration
+  digests: data/digests
   logs: logs
 
 logging:

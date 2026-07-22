@@ -24,6 +24,7 @@ def test_generated_artifacts_are_gitignored() -> None:
         "data/features/normalized/",
         "data/features/resnet/_model_cache/",
         "data/calibration/",
+        "data/digests/",
         "data/tmp/*",
         "*.ckpt",
         "*.pth",

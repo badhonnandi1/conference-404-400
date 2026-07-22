@@ -18,6 +18,7 @@ data/features/temporal/
 data/features/normalized/
 data/features/resnet/_model_cache/
 data/calibration/
+data/digests/
 data/tmp/*
 
 *.ckpt

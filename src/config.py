@@ -43,6 +43,7 @@ class PathsConfig:
     temporal_features: Path
     normalized_features: Path
     calibration: Path
+    digests: Path
     logs: Path
 
 
@@ -75,6 +76,34 @@ class FeaturesConfig:
 
 
 @dataclass(frozen=True)
+class QuantizationStreamConfig:
+    """Configuration for one quantized authentication stream."""
+
+    method: str
+    bits_per_feature: int
+    threshold_source: str | None = None
+    gray_codes: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class QuantizationConfig:
+    """Configuration for binary digest quantization."""
+
+    version: str
+    resnet: QuantizationStreamConfig
+    temporal: QuantizationStreamConfig
+    bit_order: str
+    pack_bits: bool
+
+
+@dataclass(frozen=True)
+class AuthenticationConfig:
+    """Authentication-stage configuration values."""
+
+    quantization: QuantizationConfig
+
+
+@dataclass(frozen=True)
 class TemporalFeatureConfig:
     """Configuration for temporal consistency feature extraction."""
 
@@ -94,6 +123,7 @@ class AppConfig:
     project: ProjectConfig
     video: VideoConfig
     features: FeaturesConfig
+    authentication: AuthenticationConfig
     paths: PathsConfig
     logging: LoggingConfig
     project_root: Path
@@ -141,6 +171,13 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     features = _require_mapping(config.get("features", {}), "features")
     resnet = _require_mapping(features.get("resnet", {}), "features.resnet")
     temporal = _require_mapping(features.get("temporal", {}), "features.temporal")
+    authentication = _require_mapping(config.get("authentication", {}), "authentication")
+    quantization = _require_mapping(authentication.get("quantization", {}), "authentication.quantization")
+    quant_resnet = _require_mapping(quantization.get("resnet", {}), "authentication.quantization.resnet")
+    quant_temporal = _require_mapping(
+        quantization.get("temporal", {}),
+        "authentication.quantization.temporal",
+    )
     paths = _require_mapping(config.get("paths"), "paths")
     logging = _require_mapping(config.get("logging"), "logging")
 
@@ -199,6 +236,26 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     ):
         raise ConfigurationError("features.temporal.segment_aggregation must be a list of strings.")
 
+    quantization_version = str(quantization.get("version", "dev_quantizer_v1"))
+    bit_order = str(quantization.get("bit_order", "big")).lower()
+    if bit_order not in {"big", "little"}:
+        raise ConfigurationError("authentication.quantization.bit_order must be 'big' or 'little'.")
+    try:
+        resnet_bits = int(quant_resnet.get("bits_per_feature", 1))
+        temporal_bits = int(quant_temporal.get("bits_per_feature", 2))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("Quantization bits_per_feature values must be integers.") from exc
+    if resnet_bits != 1:
+        raise ConfigurationError("Phase 5 requires ResNet bits_per_feature to be 1.")
+    if temporal_bits != 2:
+        raise ConfigurationError("Phase 5 requires temporal bits_per_feature to be 2.")
+    gray_codes = quant_temporal.get(
+        "gray_codes",
+        {"bin_0": "00", "bin_1": "01", "bin_2": "11", "bin_3": "10"},
+    )
+    if not isinstance(gray_codes, dict):
+        raise ConfigurationError("authentication.quantization.temporal.gray_codes must be a mapping.")
+
     try:
         paths_config = PathsConfig(
             originals=_resolve_project_path(project_root, str(paths["originals"])),
@@ -218,6 +275,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             calibration=_resolve_project_path(
                 project_root, str(paths.get("calibration", "data/calibration"))
             ),
+            digests=_resolve_project_path(project_root, str(paths.get("digests", "data/digests"))),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
     except KeyError as exc:
@@ -252,6 +310,25 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
                 changed_pixel_threshold=changed_pixel_threshold,
                 segment_aggregation=tuple(item.lower() for item in temporal_aggregation),
             ),
+        ),
+        authentication=AuthenticationConfig(
+            quantization=QuantizationConfig(
+                version=quantization_version,
+                resnet=QuantizationStreamConfig(
+                    method=str(quant_resnet.get("method", "median_binary")),
+                    threshold_source=str(
+                        quant_resnet.get("threshold_source", "normalized_calibration_median")
+                    ),
+                    bits_per_feature=resnet_bits,
+                ),
+                temporal=QuantizationStreamConfig(
+                    method=str(quant_temporal.get("method", "quartile_gray_code")),
+                    bits_per_feature=temporal_bits,
+                    gray_codes={str(key): str(value) for key, value in gray_codes.items()},
+                ),
+                bit_order=bit_order,
+                pack_bits=bool(quantization.get("pack_bits", True)),
+            )
         ),
         paths=paths_config,
         logging=LoggingConfig(level=str(logging.get("level", "INFO")).upper()),
@@ -307,6 +384,7 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.temporal_features,
         config.paths.normalized_features,
         config.paths.calibration,
+        config.paths.digests,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

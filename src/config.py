@@ -41,6 +41,8 @@ class PathsConfig:
     manifests: Path
     resnet_features: Path
     temporal_features: Path
+    normalized_features: Path
+    calibration: Path
     logs: Path
 
 
@@ -210,6 +212,12 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             temporal_features=_resolve_project_path(
                 project_root, str(paths.get("temporal_features", "data/features/temporal"))
             ),
+            normalized_features=_resolve_project_path(
+                project_root, str(paths.get("normalized_features", "data/features/normalized"))
+            ),
+            calibration=_resolve_project_path(
+                project_root, str(paths.get("calibration", "data/calibration"))
+            ),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
     except KeyError as exc:
@@ -297,6 +305,8 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.manifests,
         config.paths.resnet_features,
         config.paths.temporal_features,
+        config.paths.normalized_features,
+        config.paths.calibration,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import platform
 import sys
 from time import perf_counter
 from typing import Sequence
+
+import numpy as np
 
 from src.config import (
     AppConfig,
@@ -18,6 +21,7 @@ from src.config import (
     resolve_video_path,
 )
 from src.features.aggregation import SegmentAggregationError, aggregate_segment_embeddings
+from src.features.alignment import FeatureAlignmentError
 from src.features.device import DeviceSelectionError, select_device
 from src.features.feature_storage import (
     build_feature_cache_key,
@@ -27,6 +31,17 @@ from src.features.feature_storage import (
     save_feature_manifest,
     save_feature_npz,
     sha256_file,
+)
+from src.features.fusion import FeatureFusionError
+from src.features.normalization import NormalizationError
+from src.features.normalization_storage import (
+    DEFAULT_CALIBRATION_ID,
+    DEVELOPMENT_NORMALIZATION_WARNING,
+    fit_and_store_normalization_artifact,
+    load_normalization_artifact,
+    load_normalized_npz,
+    normalize_and_store_features,
+    normalized_output_paths,
 )
 from src.features.resnet_features import (
     FeatureExtractionError,
@@ -171,6 +186,56 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Changed-pixel threshold in 8-bit pixel units.",
     )
+    fit_normalization = subparsers.add_parser(
+        "fit-normalization",
+        parents=[common],
+        help="Fit development stream-specific normalization parameters.",
+    )
+    fit_normalization.add_argument("--video-ids", nargs="+", required=True, help="Video IDs used for calibration.")
+    fit_normalization.add_argument(
+        "--calibration-id",
+        default=DEFAULT_CALIBRATION_ID,
+        help="Calibration artifact identifier.",
+    )
+    fit_normalization.add_argument("--status", default="development", help="Calibration status label.")
+    normalize_features = subparsers.add_parser(
+        "normalize-features",
+        parents=[common],
+        help="Normalize aligned ResNet and temporal features for one video.",
+    )
+    normalize_features.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    normalize_features.add_argument(
+        "--calibration-id",
+        default=DEFAULT_CALIBRATION_ID,
+        help="Calibration artifact identifier.",
+    )
+    normalize_features_all = subparsers.add_parser(
+        "normalize-features-all",
+        parents=[common],
+        help="Normalize aligned features for multiple videos.",
+    )
+    normalize_features_all.add_argument("--video-ids", nargs="+", required=True, help="Video IDs to normalize.")
+    normalize_features_all.add_argument(
+        "--calibration-id",
+        default=DEFAULT_CALIBRATION_ID,
+        help="Calibration artifact identifier.",
+    )
+    inspect_normalization = subparsers.add_parser(
+        "inspect-normalization",
+        parents=[common],
+        help="Inspect a saved normalization artifact.",
+    )
+    inspect_normalization.add_argument(
+        "--calibration-id",
+        default=DEFAULT_CALIBRATION_ID,
+        help="Calibration artifact identifier.",
+    )
+    inspect_normalized = subparsers.add_parser(
+        "inspect-normalized-features",
+        parents=[common],
+        help="Inspect normalized feature outputs for one video.",
+    )
+    inspect_normalized.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
     return parser
 
 
@@ -628,6 +693,158 @@ def command_extract_temporal_all(args: argparse.Namespace, config: AppConfig) ->
     return 0 if failures == 0 else 1
 
 
+def _safe_video_ids(values: Sequence[str]) -> list[str]:
+    return [safe_video_id(value) for value in values]
+
+
+def command_fit_normalization(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle development normalization fitting."""
+
+    video_ids = _safe_video_ids(args.video_ids)
+    artifact, aligned_sets = fit_and_store_normalization_artifact(
+        video_ids=video_ids,
+        resnet_root=config.paths.resnet_features,
+        temporal_root=config.paths.temporal_features,
+        manifests_root=config.paths.manifests,
+        calibration_root=config.paths.calibration,
+        calibration_id=args.calibration_id,
+        status=args.status,
+        overwrite=args.overwrite,
+    )
+    print(f"Saved normalization parameters: {artifact.paths.npz_path}")
+    print(f"Saved normalization manifest: {artifact.paths.manifest_path}")
+    print(f"Calibration ID: {artifact.calibration_id}")
+    print(f"Status: {artifact.manifest['status']}")
+    print(f"Development-only: {artifact.manifest['development_only']}")
+    print(f"Source videos: {video_ids}")
+    print(f"Total calibration segments: {artifact.manifest['total_calibration_segments']}")
+    print(f"ResNet dimension: {artifact.resnet_normalizer.feature_dimension}")
+    print(f"Temporal dimension: {artifact.temporal_normalizer.feature_dimension}")
+    print(f"Zero-IQR ResNet dimensions: {int(np.count_nonzero(artifact.resnet_normalizer.zero_iqr_mask))}")
+    print(f"Zero-IQR temporal dimensions: {int(np.count_nonzero(artifact.temporal_normalizer.zero_iqr_mask))}")
+    print(DEVELOPMENT_NORMALIZATION_WARNING)
+    if any(aligned.warnings for aligned in aligned_sets):
+        print("Warnings were recorded in the calibration manifest.")
+    return 0
+
+
+def command_normalize_features(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle normalized feature generation for one video."""
+
+    video_id = safe_video_id(args.video_id)
+    bundle, manifest, paths, cache_reused = normalize_and_store_features(
+        video_id=video_id,
+        resnet_root=config.paths.resnet_features,
+        temporal_root=config.paths.temporal_features,
+        manifests_root=config.paths.manifests,
+        calibration_root=config.paths.calibration,
+        normalized_root=config.paths.normalized_features,
+        calibration_id=args.calibration_id,
+        overwrite=args.overwrite,
+    )
+    if cache_reused:
+        print(f"Reusing cached normalized features: {paths.npz_path}")
+        print(f"Normalized manifest: {paths.manifest_path}")
+        return 0
+    assert bundle is not None
+    min_value, max_value = bundle.value_range()
+    print(f"Saved normalized feature NPZ: {paths.npz_path}")
+    print(f"Saved normalized feature manifest: {paths.manifest_path}")
+    print(f"Video ID: {video_id}")
+    print(f"Calibration ID: {manifest['calibration_id']}")
+    print(f"Segment count: {manifest['segment_count']}")
+    print(f"ResNet normalized: {bundle.resnet_normalized_features.shape}")
+    print(f"Temporal normalized: {bundle.temporal_normalized_features.shape}")
+    print(f"Combined normalized: {bundle.combined_normalized_features.shape}")
+    print(f"Value range: [{min_value:.6f}, {max_value:.6f}]")
+    print(f"Finite values: {bundle.finite()}")
+    print(f"Processing time: {manifest['processing_time_seconds']:.6f} seconds")
+    return 0 if bundle.finite() else 1
+
+
+def command_normalize_features_all(args: argparse.Namespace, config: AppConfig) -> int:
+    """Handle normalized feature generation for multiple videos."""
+
+    failures = 0
+    for video_id in _safe_video_ids(args.video_ids):
+        bundle, manifest, paths, cache_reused = normalize_and_store_features(
+            video_id=video_id,
+            resnet_root=config.paths.resnet_features,
+            temporal_root=config.paths.temporal_features,
+            manifests_root=config.paths.manifests,
+            calibration_root=config.paths.calibration,
+            normalized_root=config.paths.normalized_features,
+            calibration_id=args.calibration_id,
+            overwrite=args.overwrite,
+        )
+        if cache_reused:
+            print(f"{video_id}: reused cached normalized features at {paths.npz_path}")
+            continue
+        assert bundle is not None
+        failures += 0 if bundle.finite() else 1
+        print(
+            f"{video_id}: resnet={bundle.resnet_normalized_features.shape}, "
+            f"temporal={bundle.temporal_normalized_features.shape}, "
+            f"combined={bundle.combined_normalized_features.shape}, "
+            f"finite={bundle.finite()}, time={manifest['processing_time_seconds']:.6f}s"
+        )
+    return 0 if failures == 0 else 1
+
+
+def command_inspect_normalization(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect a saved normalization artifact."""
+
+    artifact = load_normalization_artifact(config.paths.calibration, args.calibration_id)
+    print(f"Calibration ID: {artifact.calibration_id}")
+    print(f"Status: {artifact.manifest['status']}")
+    print(f"Development-only: {artifact.manifest['development_only']}")
+    print(f"Warning: {DEVELOPMENT_NORMALIZATION_WARNING}")
+    print(f"Source videos: {artifact.manifest['source_video_ids']}")
+    print(f"Total calibration segments: {artifact.manifest['total_calibration_segments']}")
+    print(f"ResNet dimension: {artifact.resnet_normalizer.feature_dimension}")
+    print(f"Temporal dimension: {artifact.temporal_normalizer.feature_dimension}")
+    print(f"Method: {artifact.manifest['normalization_method']}")
+    print(f"Epsilon: {artifact.resnet_normalizer.epsilon}")
+    print(f"Clipping range: [{artifact.resnet_normalizer.clip_min}, {artifact.resnet_normalizer.clip_max}]")
+    print(f"Zero-IQR ResNet dimensions: {int(np.count_nonzero(artifact.resnet_normalizer.zero_iqr_mask))}")
+    print(f"Zero-IQR temporal dimensions: {int(np.count_nonzero(artifact.temporal_normalizer.zero_iqr_mask))}")
+    print(f"NPZ: {artifact.paths.npz_path}")
+    print(f"NPZ checksum: {artifact.npz_sha256}")
+    return 0
+
+
+def command_inspect_normalized_features(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect normalized feature arrays for one video."""
+
+    video_id = safe_video_id(args.video_id)
+    paths = normalized_output_paths(config.paths.normalized_features, video_id)
+    if not paths.manifest_path.exists() or not paths.npz_path.exists():
+        raise FileNotFoundError(f"Normalized feature outputs not found for {video_id}: {paths.output_dir}")
+    with paths.manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    arrays = load_normalized_npz(paths.npz_path)
+    combined = arrays["combined_normalized_features"]
+    finite = bool(np.all(np.isfinite(combined)))
+    print(f"Video ID: {video_id}")
+    print(f"Calibration ID: {manifest['calibration_id']}")
+    print(f"Development-only warning: {manifest['development_warning']}")
+    print(f"Segment count: {manifest['segment_count']}")
+    print(f"ResNet dimension: {manifest['feature_dimensions']['resnet_normalized']}")
+    print(f"Temporal dimension: {manifest['feature_dimensions']['temporal_normalized']}")
+    print(f"Combined dimension: {manifest['feature_dimensions']['combined_normalized']}")
+    print(f"Minimum normalized value: {float(np.min(combined)):.6f}")
+    print(f"Maximum normalized value: {float(np.max(combined)):.6f}")
+    print(f"Finite values: {finite}")
+    settings = manifest["normalization_settings"]
+    print(f"Zero-IQR ResNet dimensions: {settings['resnet_zero_iqr_dimension_count']}")
+    print(f"Zero-IQR temporal dimensions: {settings['temporal_zero_iqr_dimension_count']}")
+    print(f"Source ResNet checksum: {manifest['source_resnet_sha256']}")
+    print(f"Source temporal checksum: {manifest['source_temporal_sha256']}")
+    print(f"Calibration checksum: {manifest['calibration_npz_sha256']}")
+    print(f"Output checksum: {manifest['npz_sha256']}")
+    return 0 if finite else 1
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -701,11 +918,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_extract_temporal(args, config)
         if args.command == "extract-temporal-all":
             return command_extract_temporal_all(args, config)
+        if args.command == "fit-normalization":
+            return command_fit_normalization(args, config)
+        if args.command == "normalize-features":
+            return command_normalize_features(args, config)
+        if args.command == "normalize-features-all":
+            return command_normalize_features_all(args, config)
+        if args.command == "inspect-normalization":
+            return command_inspect_normalization(args, config)
+        if args.command == "inspect-normalized-features":
+            return command_inspect_normalized_features(args, config)
     except (
         ConfigurationError,
         DeviceSelectionError,
         FeatureExtractionError,
+        FeatureAlignmentError,
+        FeatureFusionError,
         FFmpegToolError,
+        NormalizationError,
         SegmentAggregationError,
         TemporalFeatureError,
         TemporalSamplingError,
@@ -715,6 +945,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         UnsupportedVideoError,
         NoVideoStreamError,
         ExistingOutputError,
+        FileNotFoundError,
         ValueError,
     ) as exc:
         log_dir = config.paths.logs if config is not None else Path("logs")

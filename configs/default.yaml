@@ -38,6 +38,8 @@ paths:
   manifests: data/manifests
   resnet_features: data/features/resnet
   temporal_features: data/features/temporal
+  normalized_features: data/features/normalized
+  calibration: data/calibration
   logs: logs
 
 logging:

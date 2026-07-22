@@ -27,6 +27,7 @@ def test_generated_artifacts_are_gitignored() -> None:
         "data/digests/",
         "data/authentication_records/",
         "data/secrets/",
+        "data/comparisons/",
         "data/tmp/*",
         "*.ckpt",
         "*.pth",

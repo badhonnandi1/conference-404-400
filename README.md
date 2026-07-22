@@ -1,6 +1,6 @@
 # Compression-Resilient Cryptographic Authentication for Secure Surveillance Video Integrity
 
-This repository contains the first six implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, applying stream-specific robust normalization, converting normalized features into development binary digests, and protecting stored reference digest records with HMAC-SHA-256.
+This repository contains the first seven implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, applying stream-specific robust normalization, converting normalized features into development binary digests, protecting stored reference digest records with HMAC-SHA-256, and comparing segment-level digests with Hamming distance.
 
 ## Current Scope
 
@@ -29,6 +29,10 @@ Implemented in this phase:
 - Canonical JSON payload serialization for authenticated digest metadata.
 - Local development HMAC key generation, key-file loading, and environment-variable loading.
 - Constant-time HMAC tag verification.
+- Segment-level ResNet, temporal, and hybrid Hamming-distance comparison.
+- Raw and normalized distance reporting.
+- Temporary stream-balanced diagnostic scoring with explicit development-only weights.
+- Segment alignment diagnostics for missing, extra, reordered, duplicate, and timestamp-shifted segments.
 - Clipping diagnostics for normalized features before quantization.
 - Compressed NumPy feature storage and JSON feature manifests.
 - Apple Silicon MPS selection with CPU fallback.
@@ -41,7 +45,7 @@ Not implemented yet:
 - Video compression variants.
 - Tampered-video generation.
 - Perceptual hashes or SHA-256 baselines.
-- Hamming-distance digest comparison, thresholds, or verification.
+- Acceptance thresholds or final verification decisions.
 - Segment-level tamper decisions.
 - Augmentation, metrics, ROC curves, plots, or web interfaces.
 
@@ -110,6 +114,12 @@ video-authentication/
 │   │   ├── __init__.py
 │   │   ├── logging_utils.py
 │   │   └── ffmpeg_utils.py
+│   ├── verification/
+│   │   ├── __init__.py
+│   │   ├── comparison.py
+│   │   ├── comparison_storage.py
+│   │   ├── hamming.py
+│   │   └── segment_alignment.py
 │   └── video/
 │       ├── __init__.py
 │       ├── metadata.py
@@ -122,6 +132,7 @@ video-authentication/
 │   ├── test_feature_aggregation.py
 │   ├── test_feature_alignment.py
 │   ├── test_feature_fusion.py
+│   ├── test_hamming.py
 │   ├── test_feature_normalization.py
 │   ├── test_feature_storage.py
 │   ├── test_metadata.py
@@ -130,6 +141,9 @@ video-authentication/
 │   ├── test_repository_hygiene.py
 │   ├── test_resnet_features.py
 │   ├── test_segmentation.py
+│   ├── test_segment_alignment.py
+│   ├── test_comparison.py
+│   ├── test_comparison_storage.py
 │   ├── test_temporal_features.py
 │   ├── test_temporal_sampling.py
 │   ├── test_temporal_storage.py
@@ -170,6 +184,10 @@ Defaults:
 - HMAC key environment variable: `VIDEO_AUTH_HMAC_KEY_HEX`.
 - Authentication-record output path: `data/authentication_records`.
 - Local development key path: `data/secrets`.
+- Comparison output path: `data/comparisons`.
+- Comparison bit lengths: ResNet `1024`, temporal `36`, hybrid `1060`.
+- Temporary diagnostic comparison weights: ResNet `0.5`, temporal `0.5`.
+- Segment comparison alignment: strict segment-ID alignment with `1000` microseconds timestamp tolerance.
 
 ## CLI Commands
 
@@ -383,6 +401,34 @@ python main.py inspect-auth-record \
   --video-id V001
 ```
 
+Compare a trusted reference authentication record against a query digest:
+
+```bash
+python main.py compare-digests \
+  --reference-id V001 \
+  --query-id V002 \
+  --key-file data/secrets/DEV_HMAC_KEY_V1.hex \
+  --overwrite
+```
+
+Compare one reference against multiple development queries:
+
+```bash
+python main.py compare-digests-batch \
+  --reference-id V001 \
+  --query-ids V001 V002 V003 \
+  --key-file data/secrets/DEV_HMAC_KEY_V1.hex \
+  --overwrite
+```
+
+Inspect a stored comparison:
+
+```bash
+python main.py inspect-comparison \
+  --reference-id V001 \
+  --query-id V002
+```
+
 To use an environment variable instead of a key file:
 
 ```bash
@@ -419,6 +465,18 @@ Temporal-specific options:
 --frame-width 224
 --frame-height 224
 --changed-pixel-threshold 20
+```
+
+Comparison-specific options:
+
+```bash
+--reference-id V001
+--query-id V002
+--query-ids V001 V002 V003
+--key-file data/secrets/DEV_HMAC_KEY_V1.hex
+--resnet-weight 0.5
+--temporal-weight 0.5
+--overwrite
 ```
 
 ## Example Workflow
@@ -605,6 +663,24 @@ The authenticated payload includes schema version, video ID, normalization ID, q
 
 The authenticated payload excludes absolute source paths, creation time, processing-time measurements, logs, raw continuous features, full unpacked bit arrays, and secret key material.
 
+Comparison outputs:
+
+```text
+data/comparisons/V001__vs__V002/comparison_results.npz
+data/comparisons/V001__vs__V002/comparison_manifest.json
+```
+
+The comparison NPZ contains:
+
+- `matched_segment_ids`.
+- `resnet_raw_distances` and `resnet_normalized_distances`.
+- `temporal_raw_distances` and `temporal_normalized_distances`.
+- `hybrid_raw_distances` and `hybrid_normalized_distances`.
+- `balanced_diagnostic_scores`.
+- `attribution_codes`.
+
+The comparison JSON manifest records the reference authentication-record checksum, reference HMAC verification result, query digest checksum, normalization and quantization IDs, comparison configuration, segment alignment results, per-segment distances, video-level summary, output checksum, warnings, and failures.
+
 ## ResNet-18 Feature Extraction
 
 Phase 2 uses `torchvision.models.resnet18` with `ResNet18_Weights.DEFAULT`. The final fully connected classification layer is replaced with an identity layer so the model returns the 512-dimensional representation after global average pooling instead of ImageNet class logits.
@@ -750,6 +826,33 @@ Negative sanity tests for Phase 6 use temporary record copies only. Expected beh
 
 These checks validate metadata and digest-record integrity only. They are not video-tampering experiments and do not measure detection accuracy.
 
+## Hamming Distance Comparison
+
+Phase 7 compares segment-level binary digests after first verifying the trusted reference authentication record with HMAC-SHA-256. The reference side is loaded only from the authenticated JSON record. The query side is loaded from the Phase 5 digest NPZ and manifest, with checksum, normalization ID, quantization ID, bit-order, stream-boundary, digest-length, and packed/unpacked round-trip checks.
+
+Segments are aligned by `segment_id`, not by row position. This lets reordered query rows compare correctly while still detecting missing segments, extra segments, duplicate IDs, and timestamp mismatches. Strict alignment is the default: structural findings are recorded and mark the comparison incomplete, but distances are still reported for safely matched segments when possible.
+
+For every matched segment, the pipeline reports:
+
+- ResNet raw Hamming distance over 1024 bits.
+- ResNet normalized Hamming distance divided by 1024.
+- Temporal raw Hamming distance over 36 bits.
+- Temporal normalized Hamming distance divided by 36.
+- Hybrid raw Hamming distance over 1060 concatenated bits.
+- Flat hybrid normalized Hamming distance divided by 1060.
+- Temporary stream-balanced diagnostic score.
+- Relative stream attribution label: `no_difference`, `resnet_dominant`, `temporal_dominant`, or `approximately_equal`.
+
+The flat hybrid distance can be misleading because ResNet contributes 1024 bits while temporal contributes only 36 bits. A small temporal raw difference can be diluted in the 1060-bit flat hybrid denominator. For inspection, Phase 7 therefore also reports a temporary stream-balanced diagnostic score:
+
+```text
+0.5 * normalized_resnet_distance + 0.5 * normalized_temporal_distance
+```
+
+These `0.5/0.5` weights are development diagnostics only. They are not final research weights and must not be presented as calibrated verification parameters.
+
+Phase 7 intentionally does not apply acceptance thresholds and does not produce final authenticity, tamper, accept, or reject decisions. Comparisons between unrelated original videos are engineering sanity checks only; they are not tampering experiments and do not measure detection accuracy.
+
 ## Testing
 
 Run unit tests:
@@ -791,7 +894,11 @@ python main.py build-digests --video-ids V001 V002 V003 --quantization-id DEV_QU
 python main.py generate-hmac-key --output data/secrets/DEV_HMAC_KEY_V1.hex --key-id DEV_HMAC_KEY_V1
 python main.py protect-digests --video-ids V001 V002 V003 --key-file data/secrets/DEV_HMAC_KEY_V1.hex --key-id DEV_HMAC_KEY_V1 --overwrite
 python main.py verify-auth-record --video-id V001 --key-file data/secrets/DEV_HMAC_KEY_V1.hex
+python main.py compare-digests --reference-id V001 --query-id V001 --key-file data/secrets/DEV_HMAC_KEY_V1.hex --overwrite
+python main.py compare-digests-batch --reference-id V001 --query-ids V001 V002 V003 --key-file data/secrets/DEV_HMAC_KEY_V1.hex --overwrite
 ```
+
+Optional Phase 7 controlled engineering checks can use temporary digest fixtures under `data/tmp/comparison_validation/`. The expected behaviors are exact zero self-comparison, exact known one-bit and multi-bit Hamming counts, missing/extra/timestamp-shift alignment findings, duplicate-ID failure, row-reordering safety, and failed reference HMAC verification before distance calculation.
 
 Optional Phase 3 synthetic sanity checks should use temporary files under `data/tmp/`:
 
@@ -888,6 +995,15 @@ Authentication-record verification fails:
 - Confirm the digest NPZ and manifest used to create the record have not been replaced without regenerating the record.
 - Treat any failed verification as an integrity failure; the CLI does not repair records automatically.
 
+Digest comparison fails:
+
+- Confirm the reference authentication record exists under `data/authentication_records/<VIDEO_ID>/`.
+- Confirm the query digest NPZ and manifest exist under `data/digests/<VIDEO_ID>/`.
+- Confirm the same normalization and quantization IDs were used for both videos.
+- Confirm the correct HMAC key file or environment variable is being used.
+- Use `inspect-auth-record` and `inspect-digest` to check recorded checksums and dimensions.
+- Use `--overwrite` only when intentionally replacing stale comparison outputs.
+
 ## Reproducibility Notes
 
 - Video IDs are deterministic when generated from filenames.
@@ -910,10 +1026,12 @@ Authentication-record verification fails:
 - Digest cache reuse requires matching normalized feature checksum, calibration checksum, quantizer checksum, quantization version, bit order, stream boundaries, and padding policy.
 - HMAC authentication tags are computed over canonical payload bytes, not pretty-printed JSON.
 - Authentication-record cache reuse requires matching digest checksums, calibration and quantization IDs, schema version, algorithm, key ID, key fingerprint, and successful HMAC verification.
+- Comparison cache reuse requires matching reference authentication-record checksum, successful reference HMAC verification, query digest checksum, normalization ID, quantization ID, diagnostic weights, bit lengths, and alignment configuration.
+- Comparison manifests contain raw and normalized distances only; they intentionally do not contain threshold decisions.
 - JSON outputs use UTF-8 and stable indentation for reviewability.
 - No research dataset, generated videos, sampled frames, feature arrays, model cache files, or logs should be committed.
 - The current normalization artifact uses only three original videos and must not be used for final experimental results.
 - The current quantization artifact depends on only three original videos and must be regenerated after the final calibration split is prepared.
 - HMAC protects stored reference digest records and metadata; it does not make perceptual digests collision-proof.
 - HMAC does not determine whether a query video is authentic.
-- Compressed datasets, tampered datasets, optical flow, Hamming-distance verification, threshold selection, and verification accuracy remain future phases.
+- Compressed datasets, tampered datasets, optical flow, threshold selection, final verification decisions, and verification accuracy remain future phases.

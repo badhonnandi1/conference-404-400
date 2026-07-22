@@ -21,6 +21,7 @@ data/calibration/
 data/digests/
 data/authentication_records/
 data/secrets/
+data/comparisons/
 data/tmp/*
 
 *.ckpt

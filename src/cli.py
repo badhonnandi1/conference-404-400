@@ -79,6 +79,14 @@ from src.features.temporal_sampling import TemporalSamplingConfig, TemporalSampl
 from src.features.temporal_storage import extract_and_store_temporal_features
 from src.utils.ffmpeg_utils import FFmpegToolError, check_required_tools
 from src.utils.logging_utils import setup_logging
+from src.verification.comparison import ComparisonConfig, DiagnosticWeights, DigestComparisonError
+from src.verification.comparison_storage import (
+    ComparisonStorageError,
+    compare_and_store_digests,
+    inspect_comparison,
+)
+from src.verification.hamming import HammingDistanceError
+from src.verification.segment_alignment import SegmentAlignmentError
 from src.video.frame_sampling import (
     FrameSamplingError,
     sample_frames_from_segments,
@@ -360,6 +368,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect_record.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
     inspect_record.add_argument("--record", type=Path, help="Explicit authentication record JSON path.")
+    compare_digests = subparsers.add_parser(
+        "compare-digests",
+        parents=[common],
+        help="Compute segment-level Hamming distances between reference and query digests.",
+    )
+    compare_digests.add_argument("--reference-id", required=True, help="Trusted reference video ID.")
+    compare_digests.add_argument("--query-id", required=True, help="Query video ID.")
+    compare_digests.add_argument("--key-file", type=Path, help="Hex-encoded HMAC key file.")
+    compare_digests.add_argument("--resnet-weight", type=float, help="Temporary ResNet diagnostic weight.")
+    compare_digests.add_argument("--temporal-weight", type=float, help="Temporary temporal diagnostic weight.")
+    compare_batch = subparsers.add_parser(
+        "compare-digests-batch",
+        parents=[common],
+        help="Compute segment-level Hamming distances for one reference and multiple queries.",
+    )
+    compare_batch.add_argument("--reference-id", required=True, help="Trusted reference video ID.")
+    compare_batch.add_argument("--query-ids", nargs="+", required=True, help="Query video IDs.")
+    compare_batch.add_argument("--key-file", type=Path, help="Hex-encoded HMAC key file.")
+    compare_batch.add_argument("--resnet-weight", type=float, help="Temporary ResNet diagnostic weight.")
+    compare_batch.add_argument("--temporal-weight", type=float, help="Temporary temporal diagnostic weight.")
+    inspect_comparison_parser = subparsers.add_parser(
+        "inspect-comparison",
+        parents=[common],
+        help="Inspect a stored digest-comparison result.",
+    )
+    inspect_comparison_parser.add_argument("--reference-id", required=True, help="Trusted reference video ID.")
+    inspect_comparison_parser.add_argument("--query-id", required=True, help="Query video ID.")
     return parser
 
 
@@ -1282,6 +1317,137 @@ def command_inspect_auth_record(args: argparse.Namespace, config: AppConfig) -> 
     return 0
 
 
+def _comparison_config_from_args(args: argparse.Namespace, config: AppConfig) -> ComparisonConfig:
+    comparison = config.verification.comparison
+    resnet_weight = (
+        float(args.resnet_weight)
+        if getattr(args, "resnet_weight", None) is not None
+        else comparison.resnet_weight
+    )
+    temporal_weight = (
+        float(args.temporal_weight)
+        if getattr(args, "temporal_weight", None) is not None
+        else comparison.temporal_weight
+    )
+    phase_config = ComparisonConfig(
+        resnet_bit_length=comparison.resnet_bit_length,
+        temporal_bit_length=comparison.temporal_bit_length,
+        hybrid_bit_length=comparison.hybrid_bit_length,
+        diagnostic_weights=DiagnosticWeights(resnet=resnet_weight, temporal=temporal_weight),
+        tie_tolerance=comparison.tie_tolerance,
+        segment_alignment=comparison.segment_alignment,
+        timestamp_tolerance_microseconds=comparison.timestamp_tolerance_microseconds,
+    )
+    phase_config.validate()
+    return phase_config
+
+
+def _print_stored_comparison_summary(stored) -> None:
+    summary = stored.result.video_summary
+    status = "reused" if stored.cache_reused else "saved"
+    print(f"Comparison ID: {stored.result.comparison_id}")
+    print(f"Output status: {status}")
+    print(f"Manifest: {stored.paths.manifest_path}")
+    print(f"NPZ: {stored.paths.npz_path}")
+    print(f"Reference HMAC valid: {stored.result.reference_hmac_verification_result['hmac_valid']}")
+    print(f"Matched segments: {summary['matched_segment_count']}")
+    print(f"Missing segments: {summary['missing_segment_count']}")
+    print(f"Extra segments: {summary['extra_segment_count']}")
+    print(f"Timestamp mismatches: {summary['timestamp_mismatch_count']}")
+    print(f"Alignment valid: {summary['alignment_valid']}")
+    print(f"Comparison complete: {summary['comparison_complete']}")
+    print(f"Mean ResNet distance: {summary['mean_resnet_normalized_distance']}")
+    print(f"Mean temporal distance: {summary['mean_temporal_normalized_distance']}")
+    print(f"Mean flat hybrid distance: {summary['mean_flat_hybrid_normalized_distance']}")
+    print(f"Mean balanced diagnostic score: {summary['mean_balanced_diagnostic_score']}")
+    print(stored.result.warnings[0])
+
+
+def command_compare_digests(args: argparse.Namespace, config: AppConfig) -> int:
+    """Compare one reference/query digest pair using segment-level Hamming distances."""
+
+    key_info = _hmac_key_from_args(args, config)
+    comparison_config = _comparison_config_from_args(args, config)
+    stored = compare_and_store_digests(
+        reference_id=safe_video_id(args.reference_id),
+        query_id=safe_video_id(args.query_id),
+        authentication_record_root=config.paths.authentication_records,
+        digest_root=config.paths.digests,
+        comparison_root=config.paths.comparisons,
+        key_info=key_info,
+        config=comparison_config,
+        algorithm=config.authentication.hmac.algorithm,
+        overwrite=args.overwrite,
+    )
+    _print_stored_comparison_summary(stored)
+    return 0
+
+
+def command_compare_digests_batch(args: argparse.Namespace, config: AppConfig) -> int:
+    """Compare one trusted reference against multiple query digests."""
+
+    key_info = _hmac_key_from_args(args, config)
+    comparison_config = _comparison_config_from_args(args, config)
+    for query_id in _safe_video_ids(args.query_ids):
+        stored = compare_and_store_digests(
+            reference_id=safe_video_id(args.reference_id),
+            query_id=query_id,
+            authentication_record_root=config.paths.authentication_records,
+            digest_root=config.paths.digests,
+            comparison_root=config.paths.comparisons,
+            key_info=key_info,
+            config=comparison_config,
+            algorithm=config.authentication.hmac.algorithm,
+            overwrite=args.overwrite,
+        )
+        summary = stored.result.video_summary
+        status = "reused" if stored.cache_reused else "saved"
+        print(
+            f"{stored.result.comparison_id}: {status}, "
+            f"matched={summary['matched_segment_count']}, "
+            f"missing={summary['missing_segment_count']}, "
+            f"extra={summary['extra_segment_count']}, "
+            f"max_resnet={summary['maximum_resnet_normalized_distance']}, "
+            f"max_temporal={summary['maximum_temporal_normalized_distance']}, "
+            f"max_balanced={summary['maximum_balanced_diagnostic_score']}"
+        )
+    print("No acceptance threshold was applied.")
+    return 0
+
+
+def command_inspect_comparison(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect a stored digest-comparison result."""
+
+    reference_id = safe_video_id(args.reference_id)
+    query_id = safe_video_id(args.query_id)
+    manifest = inspect_comparison(config.paths.comparisons, reference_id, query_id)
+    summary = manifest["video_level_summary"]
+    print(f"Comparison ID: {manifest['comparison_id']}")
+    print(f"Reference ID: {manifest['reference_video_id']}")
+    print(f"Query ID: {manifest['query_video_id']}")
+    print(f"Reference HMAC valid: {manifest['reference_hmac_verification_result']['hmac_valid']}")
+    print(f"Normalization ID: {manifest['normalization_id']}")
+    print(f"Quantization ID: {manifest['quantization_id']}")
+    print(f"Matched segments: {summary['matched_segment_count']}")
+    print(f"Missing segments: {summary['missing_segment_count']}")
+    print(f"Extra segments: {summary['extra_segment_count']}")
+    print(f"Timestamp mismatches: {summary['timestamp_mismatch_count']}")
+    for segment in manifest["per_segment_results"]:
+        print(
+            f"Segment {segment['segment_id']}: "
+            f"resnet={segment['resnet_normalized_distance']:.12f}, "
+            f"temporal={segment['temporal_normalized_distance']:.12f}, "
+            f"flat_hybrid={segment['flat_hybrid_normalized_distance']:.12f}, "
+            f"balanced={segment['development_diagnostic_score']:.12f}, "
+            f"attribution={segment['relative_stream_attribution']}"
+        )
+    print(f"Max ResNet segment: {summary['segment_id_with_maximum_resnet_distance']}")
+    print(f"Max temporal segment: {summary['segment_id_with_maximum_temporal_distance']}")
+    print(f"Max balanced-score segment: {summary['segment_id_with_maximum_balanced_diagnostic_score']}")
+    print(manifest["no_threshold_warning"])
+    return 0
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -1385,20 +1551,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_verify_auth_record(args, config)
         if args.command == "inspect-auth-record":
             return command_inspect_auth_record(args, config)
+        if args.command == "compare-digests":
+            return command_compare_digests(args, config)
+        if args.command == "compare-digests-batch":
+            return command_compare_digests_batch(args, config)
+        if args.command == "inspect-comparison":
+            return command_inspect_comparison(args, config)
     except (
         AuthenticationRecordError,
         CanonicalizationError,
+        ComparisonStorageError,
         ConfigurationError,
         DeviceSelectionError,
         DigestError,
+        DigestComparisonError,
         FeatureExtractionError,
         FeatureAlignmentError,
         FeatureFusionError,
         FFmpegToolError,
+        HammingDistanceError,
         HMACAuthenticationError,
         NormalizationError,
         QuantizationError,
         SegmentAggregationError,
+        SegmentAlignmentError,
         TemporalFeatureError,
         TemporalSamplingError,
         VideoMetadataError,

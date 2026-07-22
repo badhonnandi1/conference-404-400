@@ -55,6 +55,18 @@ authentication:
     bit_order: big
     pack_bits: true
 
+verification:
+  comparison:
+    resnet_bit_length: 1024
+    temporal_bit_length: 36
+    hybrid_bit_length: 1060
+    diagnostic_weights:
+      resnet: 0.5
+      temporal: 0.5
+    tie_tolerance: 1.0e-9
+    segment_alignment: strict
+    timestamp_tolerance_microseconds: 1000
+
 paths:
   originals: data/originals
   segments: data/segments
@@ -68,6 +80,7 @@ paths:
   digests: data/digests
   authentication_records: data/authentication_records
   local_secrets: data/secrets
+  comparisons: data/comparisons
   logs: logs
 
 logging:

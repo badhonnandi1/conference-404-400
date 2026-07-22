@@ -46,6 +46,7 @@ class PathsConfig:
     digests: Path
     authentication_records: Path
     local_secrets: Path
+    comparisons: Path
     logs: Path
 
 
@@ -119,6 +120,27 @@ class AuthenticationConfig:
 
 
 @dataclass(frozen=True)
+class ComparisonVerificationConfig:
+    """Configuration for digest distance comparison."""
+
+    resnet_bit_length: int
+    temporal_bit_length: int
+    hybrid_bit_length: int
+    resnet_weight: float
+    temporal_weight: float
+    tie_tolerance: float
+    segment_alignment: str
+    timestamp_tolerance_microseconds: int
+
+
+@dataclass(frozen=True)
+class VerificationConfig:
+    """Verification-stage configuration values."""
+
+    comparison: ComparisonVerificationConfig
+
+
+@dataclass(frozen=True)
 class TemporalFeatureConfig:
     """Configuration for temporal consistency feature extraction."""
 
@@ -139,6 +161,7 @@ class AppConfig:
     video: VideoConfig
     features: FeaturesConfig
     authentication: AuthenticationConfig
+    verification: VerificationConfig
     paths: PathsConfig
     logging: LoggingConfig
     project_root: Path
@@ -194,6 +217,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         quantization.get("temporal", {}),
         "authentication.quantization.temporal",
     )
+    verification = _require_mapping(config.get("verification", {}), "verification")
+    comparison = _require_mapping(verification.get("comparison", {}), "verification.comparison")
     paths = _require_mapping(config.get("paths"), "paths")
     logging = _require_mapping(config.get("logging"), "logging")
 
@@ -297,6 +322,37 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         raise ConfigurationError("authentication.hmac.key_environment_variable must not be empty.")
 
     try:
+        comparison_resnet_bits = int(comparison.get("resnet_bit_length", 1024))
+        comparison_temporal_bits = int(comparison.get("temporal_bit_length", 36))
+        comparison_hybrid_bits = int(comparison.get("hybrid_bit_length", 1060))
+        timestamp_tolerance_microseconds = int(comparison.get("timestamp_tolerance_microseconds", 1000))
+        tie_tolerance = float(comparison.get("tie_tolerance", 1.0e-9))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("Verification comparison numeric settings are invalid.") from exc
+    if (comparison_resnet_bits, comparison_temporal_bits, comparison_hybrid_bits) != (1024, 36, 1060):
+        raise ConfigurationError("Phase 7 comparison bit lengths must be 1024, 36, and 1060.")
+    if timestamp_tolerance_microseconds < 0:
+        raise ConfigurationError("verification.comparison.timestamp_tolerance_microseconds must be non-negative.")
+    if tie_tolerance < 0:
+        raise ConfigurationError("verification.comparison.tie_tolerance must be non-negative.")
+    weights = _require_mapping(
+        comparison.get("diagnostic_weights", {"resnet": 0.5, "temporal": 0.5}),
+        "verification.comparison.diagnostic_weights",
+    )
+    try:
+        resnet_weight = float(weights.get("resnet", 0.5))
+        temporal_weight = float(weights.get("temporal", 0.5))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("Diagnostic weights must be numeric.") from exc
+    if resnet_weight < 0 or temporal_weight < 0:
+        raise ConfigurationError("Diagnostic weights must be non-negative.")
+    if abs((resnet_weight + temporal_weight) - 1.0) > 1.0e-9:
+        raise ConfigurationError("Diagnostic weights must sum to 1.")
+    segment_alignment = str(comparison.get("segment_alignment", "strict")).lower()
+    if segment_alignment not in {"strict", "partial"}:
+        raise ConfigurationError("verification.comparison.segment_alignment must be 'strict' or 'partial'.")
+
+    try:
         paths_config = PathsConfig(
             originals=_resolve_project_path(project_root, str(paths["originals"])),
             segments=_resolve_project_path(project_root, str(paths["segments"])),
@@ -321,6 +377,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
                 str(paths.get("authentication_records", "data/authentication_records")),
             ),
             local_secrets=_resolve_project_path(project_root, str(paths.get("local_secrets", "data/secrets"))),
+            comparisons=_resolve_project_path(project_root, str(paths.get("comparisons", "data/comparisons"))),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
     except KeyError as exc:
@@ -383,6 +440,18 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
                 pack_bits=bool(quantization.get("pack_bits", True)),
             )
         ),
+        verification=VerificationConfig(
+            comparison=ComparisonVerificationConfig(
+                resnet_bit_length=comparison_resnet_bits,
+                temporal_bit_length=comparison_temporal_bits,
+                hybrid_bit_length=comparison_hybrid_bits,
+                resnet_weight=resnet_weight,
+                temporal_weight=temporal_weight,
+                tie_tolerance=tie_tolerance,
+                segment_alignment=segment_alignment,
+                timestamp_tolerance_microseconds=timestamp_tolerance_microseconds,
+            )
+        ),
         paths=paths_config,
         logging=LoggingConfig(level=str(logging.get("level", "INFO")).upper()),
         project_root=project_root,
@@ -440,6 +509,7 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.digests,
         config.paths.authentication_records,
         config.paths.local_secrets,
+        config.paths.comparisons,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

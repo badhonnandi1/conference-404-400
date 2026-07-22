@@ -31,6 +31,13 @@ features:
       - maximum
 
 authentication:
+  hmac:
+    algorithm: HMAC-SHA-256
+    digest: sha256
+    minimum_key_bytes: 32
+    schema_version: 1
+    timestamp_unit: microseconds
+    key_environment_variable: VIDEO_AUTH_HMAC_KEY_HEX
   quantization:
     version: dev_quantizer_v1
     resnet:
@@ -59,6 +66,8 @@ paths:
   normalized_features: data/features/normalized
   calibration: data/calibration
   digests: data/digests
+  authentication_records: data/authentication_records
+  local_secrets: data/secrets
   logs: logs
 
 logging:

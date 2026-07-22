@@ -1,6 +1,6 @@
 # Compression-Resilient Cryptographic Authentication for Secure Surveillance Video Integrity
 
-This repository contains the first five implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for later digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, applying stream-specific robust normalization, and converting normalized features into development binary digests.
+This repository contains the first six implementation stages of a research prototype for authenticating surveillance video integrity under compression. The current code prepares videos for digest generation by inspecting source files, creating logical time segments, sampling deterministic frames, extracting pretrained ResNet-18 frame and segment features, measuring lightweight temporal consistency inside each segment, aligning the streams, applying stream-specific robust normalization, converting normalized features into development binary digests, and protecting stored reference digest records with HMAC-SHA-256.
 
 ## Current Scope
 
@@ -25,6 +25,10 @@ Implemented in this phase:
 - Development binary quantization artifact creation and inspection.
 - ResNet, temporal, and hybrid binary digest generation.
 - Packed-byte digest storage with padding metadata and round-trip validation.
+- HMAC-SHA-256 protection for stored reference digest records.
+- Canonical JSON payload serialization for authenticated digest metadata.
+- Local development HMAC key generation, key-file loading, and environment-variable loading.
+- Constant-time HMAC tag verification.
 - Clipping diagnostics for normalized features before quantization.
 - Compressed NumPy feature storage and JSON feature manifests.
 - Apple Silicon MPS selection with CPU fallback.
@@ -37,7 +41,6 @@ Not implemented yet:
 - Video compression variants.
 - Tampered-video generation.
 - Perceptual hashes or SHA-256 baselines.
-- HMAC protection.
 - Hamming-distance digest comparison, thresholds, or verification.
 - Segment-level tamper decisions.
 - Augmentation, metrics, ROC curves, plots, or web interfaces.
@@ -84,8 +87,11 @@ video-authentication/
 │   ├── config.py
 │   ├── authentication/
 │   │   ├── __init__.py
+│   │   ├── auth_record_storage.py
+│   │   ├── canonicalization.py
 │   │   ├── digest.py
 │   │   ├── digest_storage.py
+│   │   ├── hmac_auth.py
 │   │   └── quantization.py
 │   ├── features/
 │   │   ├── __init__.py
@@ -160,6 +166,10 @@ Defaults:
 - ResNet quantization: one bit per normalized feature.
 - Temporal quantization: four bins with two-bit Gray code.
 - Hybrid digest length: `1060` bits.
+- HMAC algorithm: `HMAC-SHA-256`.
+- HMAC key environment variable: `VIDEO_AUTH_HMAC_KEY_HEX`.
+- Authentication-record output path: `data/authentication_records`.
+- Local development key path: `data/secrets`.
 
 ## CLI Commands
 
@@ -332,6 +342,52 @@ python main.py inspect-quantizer \
 
 python main.py inspect-digest \
   --video-id V001
+```
+
+Generate a local development HMAC key:
+
+```bash
+python main.py generate-hmac-key \
+  --output data/secrets/DEV_HMAC_KEY_V1.hex \
+  --key-id DEV_HMAC_KEY_V1
+```
+
+Create one HMAC-protected authentication record:
+
+```bash
+python main.py protect-digest \
+  --video-id V001 \
+  --key-file data/secrets/DEV_HMAC_KEY_V1.hex \
+  --key-id DEV_HMAC_KEY_V1 \
+  --overwrite
+```
+
+Protect the development set:
+
+```bash
+python main.py protect-digests \
+  --video-ids V001 V002 V003 \
+  --key-file data/secrets/DEV_HMAC_KEY_V1.hex \
+  --key-id DEV_HMAC_KEY_V1 \
+  --overwrite
+```
+
+Verify and inspect an authentication record:
+
+```bash
+python main.py verify-auth-record \
+  --video-id V001 \
+  --key-file data/secrets/DEV_HMAC_KEY_V1.hex
+
+python main.py inspect-auth-record \
+  --video-id V001
+```
+
+To use an environment variable instead of a key file:
+
+```bash
+export VIDEO_AUTH_HMAC_KEY_HEX="$(cat data/secrets/DEV_HMAC_KEY_V1.hex)"
+python main.py verify-auth-record --video-id V001
 ```
 
 Optional arguments:
@@ -534,6 +590,21 @@ The digest NPZ contains:
 
 The digest manifest records source normalized-feature checksums, calibration and quantizer checksums, digest dimensions, stream boundaries, bit order, padding counts, bit-one ratios, temporal bin distributions, clipping statistics, output checksum, warnings, and failures. Full bit arrays are intentionally stored in NPZ, not duplicated in JSON.
 
+HMAC-protected authentication record:
+
+```text
+data/authentication_records/V001/V001_authentication_record.json
+```
+
+The record contains:
+
+- `payload`: the canonical authenticated fields.
+- `authentication`: non-secret HMAC metadata, tag, payload checksum, key ID, key fingerprint, creation timestamp, and warnings.
+
+The authenticated payload includes schema version, video ID, normalization ID, quantization ID, development-only status, digest NPZ checksum, digest manifest checksum, bit order, stream boundaries, digest lengths, segment count, segment IDs, integer microsecond timestamps, and packed ResNet, temporal, and hybrid digest bytes as hexadecimal strings.
+
+The authenticated payload excludes absolute source paths, creation time, processing-time measurements, logs, raw continuous features, full unpacked bit arrays, and secret key material.
+
 ## ResNet-18 Feature Extraction
 
 Phase 2 uses `torchvision.models.resnet18` with `ResNet18_Weights.DEFAULT`. The final fully connected classification layer is replaced with an identity layer so the model returns the 512-dimensional representation after global average pooling instead of ImageNet class logits.
@@ -622,7 +693,62 @@ Stream boundaries are recorded as ResNet `[0, 1024)` and temporal `[1024, 1060)`
 
 Digests are packed with `numpy.packbits` using `bit_order: big`. ResNet packs to 128 bytes, temporal packs to 5 bytes with four padding bits, and hybrid packs to 133 bytes with four padding bits. The original bit length and padding-bit counts are stored so unpacking can remove padding and exactly reproduce the original bit arrays.
 
-`DEV_QUANTIZATION_V1` is development-only. It depends on `DEV_NORMALIZATION_V1`, which used only three original videos. It must be regenerated after the final calibration split is prepared. No HMAC security, Hamming-distance comparison, verification thresholds, compression-resilience result, or tamper-detection result is claimed in this phase.
+`DEV_QUANTIZATION_V1` is development-only. It depends on `DEV_NORMALIZATION_V1`, which used only three original videos. It must be regenerated after the final calibration split is prepared. No Hamming-distance comparison, verification thresholds, compression-resilience result, or tamper-detection result is claimed in this phase.
+
+## HMAC-Protected Authentication Records
+
+Phase 6 protects stored reference digest records with HMAC-SHA-256. HMAC is a symmetric message authentication code: the same secret key is used to generate and verify an authentication tag. It is not an asymmetric digital signature, does not provide public-key non-repudiation, and does not decide whether a query video is authentic.
+
+The HMAC input is the canonical JSON serialization of the `payload` object only:
+
+```python
+json.dumps(
+    payload,
+    sort_keys=True,
+    separators=(",", ":"),
+    ensure_ascii=False,
+    allow_nan=False,
+).encode("utf-8")
+```
+
+Canonicalization gives deterministic bytes independent of dictionary insertion order or outer JSON pretty-printing. Segment order remains meaningful: reordering segments changes the canonical payload and invalidates the HMAC tag.
+
+The canonical payload authenticates the stable digest record fields:
+
+- Video ID.
+- Normalization and quantization IDs.
+- Development-only status.
+- Digest NPZ and digest-manifest checksums.
+- Bit order, stream boundaries, and digest lengths.
+- Segment IDs and segment start/end timestamps converted to integer microseconds.
+- Packed ResNet, temporal, and hybrid digest bytes encoded as hexadecimal strings.
+
+Packed digests are authenticated because they are the compact stored reference form used by later verification phases. The full unpacked bit matrices stay in NPZ files for inspection and round-trip validation, but they are not duplicated in the authentication record.
+
+Key handling rules:
+
+- Use `data/secrets/DEV_HMAC_KEY_V1.hex` only for local development.
+- Or set `VIDEO_AUTH_HMAC_KEY_HEX` to a hex-encoded key.
+- Keys must be at least 32 random bytes.
+- The secret key is never stored in configuration or authentication manifests.
+- CLI output prints only key ID, source type, length, and a non-secret SHA-256 key fingerprint truncated to 16 hex characters.
+- Development keys must not be used in production.
+
+Verification recalculates the canonical payload checksum and HMAC tag, then compares the stored and calculated tags with `hmac.compare_digest`. Verification returns a non-zero CLI exit code when the record schema, algorithm, payload checksum, key fingerprint, or HMAC tag fails.
+
+Negative sanity tests for Phase 6 use temporary record copies only. Expected behavior:
+
+- Correct key and untouched record: succeeds.
+- Wrong key: fails.
+- Modified packed ResNet digest: fails.
+- Modified packed temporal digest: fails.
+- Modified timestamp: fails.
+- Modified video ID: fails.
+- Modified HMAC tag: fails.
+- Reordered segments: fails.
+- Outer JSON formatting-only change: succeeds.
+
+These checks validate metadata and digest-record integrity only. They are not video-tampering experiments and do not measure detection accuracy.
 
 ## Testing
 
@@ -662,6 +788,9 @@ python main.py fit-normalization --video-ids V001 V002 V003 --calibration-id DEV
 python main.py normalize-features-all --video-ids V001 V002 V003 --calibration-id DEV_NORMALIZATION_V1 --overwrite
 python main.py create-quantizer --normalization-id DEV_NORMALIZATION_V1 --quantization-id DEV_QUANTIZATION_V1 --status development --overwrite
 python main.py build-digests --video-ids V001 V002 V003 --quantization-id DEV_QUANTIZATION_V1 --overwrite
+python main.py generate-hmac-key --output data/secrets/DEV_HMAC_KEY_V1.hex --key-id DEV_HMAC_KEY_V1
+python main.py protect-digests --video-ids V001 V002 V003 --key-file data/secrets/DEV_HMAC_KEY_V1.hex --key-id DEV_HMAC_KEY_V1 --overwrite
+python main.py verify-auth-record --video-id V001 --key-file data/secrets/DEV_HMAC_KEY_V1.hex
 ```
 
 Optional Phase 3 synthetic sanity checks should use temporary files under `data/tmp/`:
@@ -752,6 +881,13 @@ Digest generation fails:
 - Confirm the quantizer normalization ID matches the normalized feature calibration ID.
 - Use `--overwrite` only when intentionally replacing stale digest outputs.
 
+Authentication-record verification fails:
+
+- Confirm the correct key file or `VIDEO_AUTH_HMAC_KEY_HEX` value is being used.
+- Confirm the key fingerprint printed by `inspect-auth-record` matches the loaded key.
+- Confirm the digest NPZ and manifest used to create the record have not been replaced without regenerating the record.
+- Treat any failed verification as an integrity failure; the CLI does not repair records automatically.
+
 ## Reproducibility Notes
 
 - Video IDs are deterministic when generated from filenames.
@@ -772,8 +908,12 @@ Digest generation fails:
 - Temporal digest bins use deterministic quartile boundary behavior and Gray-code encoding.
 - Packed digest round trips are validated before writing manifests.
 - Digest cache reuse requires matching normalized feature checksum, calibration checksum, quantizer checksum, quantization version, bit order, stream boundaries, and padding policy.
+- HMAC authentication tags are computed over canonical payload bytes, not pretty-printed JSON.
+- Authentication-record cache reuse requires matching digest checksums, calibration and quantization IDs, schema version, algorithm, key ID, key fingerprint, and successful HMAC verification.
 - JSON outputs use UTF-8 and stable indentation for reviewability.
 - No research dataset, generated videos, sampled frames, feature arrays, model cache files, or logs should be committed.
 - The current normalization artifact uses only three original videos and must not be used for final experimental results.
 - The current quantization artifact depends on only three original videos and must be regenerated after the final calibration split is prepared.
-- Compressed datasets, tampered datasets, optical flow, HMAC authentication, Hamming-distance verification, threshold selection, and verification accuracy remain future phases.
+- HMAC protects stored reference digest records and metadata; it does not make perceptual digests collision-proof.
+- HMAC does not determine whether a query video is authentic.
+- Compressed datasets, tampered datasets, optical flow, Hamming-distance verification, threshold selection, and verification accuracy remain future phases.

@@ -12,6 +12,14 @@ from typing import Sequence
 
 import numpy as np
 
+from src.authentication.auth_record_storage import (
+    AuthenticationRecordError,
+    authentication_record_paths,
+    inspect_authentication_record,
+    protect_digest_record,
+    verify_authentication_record_file,
+)
+from src.authentication.canonicalization import CanonicalizationError
 from src.authentication.digest import DigestError, unpack_packed_bits
 from src.authentication.digest_storage import (
     build_and_store_digest,
@@ -24,6 +32,11 @@ from src.authentication.quantization import (
     DEFAULT_QUANTIZATION_ID,
     QUANTIZATION_WARNING,
     QuantizationError,
+)
+from src.authentication.hmac_auth import (
+    HMACAuthenticationError,
+    generate_hmac_key_file,
+    load_hmac_key,
 )
 from src.config import (
     AppConfig,
@@ -303,6 +316,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect one video's binary digest outputs.",
     )
     inspect_digest.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    generate_hmac_key = subparsers.add_parser(
+        "generate-hmac-key",
+        parents=[common],
+        help="Generate a local development HMAC key file.",
+    )
+    generate_hmac_key.add_argument("--output", required=True, type=Path, help="Output hex key file path.")
+    generate_hmac_key.add_argument("--key-id", required=True, help="Non-secret key identifier.")
+    generate_hmac_key.add_argument(
+        "--key-bytes",
+        type=int,
+        default=32,
+        help="Number of random key bytes to generate. Defaults to 32.",
+    )
+    protect_digest = subparsers.add_parser(
+        "protect-digest",
+        parents=[common],
+        help="Create an HMAC-protected authentication record for one video's digests.",
+    )
+    protect_digest.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    protect_digest.add_argument("--key-file", type=Path, help="Hex-encoded HMAC key file.")
+    protect_digest.add_argument("--key-id", help="Non-secret key identifier stored with the record.")
+    protect_digests = subparsers.add_parser(
+        "protect-digests",
+        parents=[common],
+        help="Create HMAC-protected authentication records for multiple videos.",
+    )
+    protect_digests.add_argument("--video-ids", nargs="+", required=True, help="Video IDs to protect.")
+    protect_digests.add_argument("--key-file", type=Path, help="Hex-encoded HMAC key file.")
+    protect_digests.add_argument("--key-id", help="Non-secret key identifier stored with the records.")
+    verify_record = subparsers.add_parser(
+        "verify-auth-record",
+        parents=[common],
+        help="Verify one HMAC-protected authentication record.",
+    )
+    verify_record.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    verify_record.add_argument("--record", type=Path, help="Explicit authentication record JSON path.")
+    verify_record.add_argument("--key-file", type=Path, help="Hex-encoded HMAC key file.")
+    inspect_record = subparsers.add_parser(
+        "inspect-auth-record",
+        parents=[common],
+        help="Inspect one HMAC-protected authentication record without verifying it.",
+    )
+    inspect_record.add_argument("--video-id", required=True, help="Video identifier, for example V001.")
+    inspect_record.add_argument("--record", type=Path, help="Explicit authentication record JSON path.")
     return parser
 
 
@@ -1081,6 +1138,150 @@ def command_inspect_digest(args: argparse.Namespace, config: AppConfig) -> int:
     return 0 if round_trip else 1
 
 
+def _hmac_key_from_args(args: argparse.Namespace, config: AppConfig):
+    return load_hmac_key(
+        key_file=resolve_video_path(args.key_file, config.project_root) if getattr(args, "key_file", None) else None,
+        key_id=getattr(args, "key_id", None),
+        environment_variable=config.authentication.hmac.key_environment_variable,
+        minimum_key_bytes=config.authentication.hmac.minimum_key_bytes,
+    )
+
+
+def command_generate_hmac_key(args: argparse.Namespace, config: AppConfig) -> int:
+    """Generate a local development HMAC key file."""
+
+    output_path = resolve_video_path(args.output, config.project_root)
+    key_info = generate_hmac_key_file(
+        output_path=output_path,
+        key_id=args.key_id,
+        key_bytes=args.key_bytes,
+        overwrite=args.overwrite,
+    )
+    print(f"Generated HMAC key file: {output_path}")
+    print(f"Key ID: {key_info.key_id}")
+    print(f"Key source type: {key_info.source_type}")
+    print(f"Key length: {key_info.key_length_bytes} bytes")
+    print(f"Key fingerprint: {key_info.key_fingerprint}")
+    print("Secret key material was not printed.")
+    return 0
+
+
+def command_protect_digest(args: argparse.Namespace, config: AppConfig) -> int:
+    """Create an HMAC-protected authentication record for one video's digests."""
+
+    video_id = safe_video_id(args.video_id)
+    key_info = _hmac_key_from_args(args, config)
+    stored = protect_digest_record(
+        video_id=video_id,
+        digest_root=config.paths.digests,
+        authentication_record_root=config.paths.authentication_records,
+        key_info=key_info,
+        schema_version=config.authentication.hmac.schema_version,
+        algorithm=config.authentication.hmac.algorithm,
+        overwrite=args.overwrite,
+    )
+    authentication = stored.record["authentication"]
+    print(f"Video ID: {video_id}")
+    if stored.cache_reused:
+        print(f"Reusing cached authentication record: {stored.paths.record_path}")
+    else:
+        print(f"Saved authentication record: {stored.paths.record_path}")
+    print(f"Algorithm: {authentication['algorithm']}")
+    print(f"Key ID: {authentication['key_id']}")
+    print(f"Key fingerprint: {authentication['key_fingerprint']}")
+    print(f"Key length: {authentication['key_length_bytes']} bytes")
+    print(f"Segment count: {stored.record['payload']['segment_count']}")
+    print(f"Authentication tag length: {len(authentication['tag_hex'])} hex characters")
+    print(f"Canonical payload checksum: {authentication['canonical_payload_sha256']}")
+    print(f"Record file checksum: {stored.record_file_sha256}")
+    return 0
+
+
+def command_protect_digests(args: argparse.Namespace, config: AppConfig) -> int:
+    """Create HMAC-protected authentication records for multiple videos."""
+
+    key_info = _hmac_key_from_args(args, config)
+    for video_id in _safe_video_ids(args.video_ids):
+        stored = protect_digest_record(
+            video_id=video_id,
+            digest_root=config.paths.digests,
+            authentication_record_root=config.paths.authentication_records,
+            key_info=key_info,
+            schema_version=config.authentication.hmac.schema_version,
+            algorithm=config.authentication.hmac.algorithm,
+            overwrite=args.overwrite,
+        )
+        authentication = stored.record["authentication"]
+        status = "reused" if stored.cache_reused else "saved"
+        print(
+            f"{video_id}: {status}={stored.paths.record_path}, "
+            f"segments={stored.record['payload']['segment_count']}, "
+            f"algorithm={authentication['algorithm']}, "
+            f"key_id={authentication['key_id']}, "
+            f"key_fingerprint={authentication['key_fingerprint']}, "
+            f"tag_len={len(authentication['tag_hex'])}, "
+            f"payload_sha256={authentication['canonical_payload_sha256']}"
+        )
+    return 0
+
+
+def command_verify_auth_record(args: argparse.Namespace, config: AppConfig) -> int:
+    """Verify one HMAC-protected authentication record."""
+
+    video_id = safe_video_id(args.video_id)
+    record_path = (
+        resolve_video_path(args.record, config.project_root)
+        if getattr(args, "record", None)
+        else authentication_record_paths(config.paths.authentication_records, video_id).record_path
+    )
+    key_info = _hmac_key_from_args(args, config)
+    result = verify_authentication_record_file(
+        record_path,
+        key_info=key_info,
+        algorithm=config.authentication.hmac.algorithm,
+    )
+    print(f"Video ID: {result.video_id or video_id}")
+    print(f"Record: {record_path}")
+    print(f"Record valid: {result.record_valid}")
+    print(f"HMAC valid: {result.hmac_valid}")
+    print(f"Payload checksum valid: {result.payload_checksum_valid}")
+    print(f"Key fingerprint match: {result.key_fingerprint_match}")
+    print(f"Schema valid: {result.schema_valid}")
+    print(f"Algorithm supported: {result.algorithm_supported}")
+    print(f"Key ID: {result.key_id}")
+    print(f"Failure reason: {result.failure_reason or 'none'}")
+    print(f"Verification timestamp: {result.verification_timestamp}")
+    return 0 if result.record_valid else 1
+
+
+def command_inspect_auth_record(args: argparse.Namespace, config: AppConfig) -> int:
+    """Inspect one HMAC-protected authentication record without printing secrets."""
+
+    video_id = safe_video_id(args.video_id)
+    record_path = (
+        resolve_video_path(args.record, config.project_root)
+        if getattr(args, "record", None)
+        else authentication_record_paths(config.paths.authentication_records, video_id).record_path
+    )
+    summary = inspect_authentication_record(record_path)
+    print(f"Video ID: {summary['video_id']}")
+    print(f"Schema version: {summary['schema_version']}")
+    print(f"Record schema version: {summary['record_schema_version']}")
+    print(f"Algorithm: {summary['algorithm']}")
+    print(f"Key ID: {summary['key_id']}")
+    print(f"Key fingerprint: {summary['key_fingerprint']}")
+    print(f"Segment count: {summary['segment_count']}")
+    print(f"Normalization ID: {summary['normalization_id']}")
+    print(f"Quantization ID: {summary['quantization_id']}")
+    print(f"Digest lengths: {summary['digest_lengths']}")
+    print(f"Payload checksum: {summary['canonical_payload_sha256']}")
+    print(f"Record checksum: {summary['record_file_sha256']}")
+    print(f"Development-only: {summary['development_only']}")
+    print(f"Warnings: {summary['warnings']}")
+    print(f"Record path: {summary['record_path']}")
+    return 0
+
+
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
     """Handle the complete preprocessing command."""
 
@@ -1174,7 +1375,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_inspect_quantizer(args, config)
         if args.command == "inspect-digest":
             return command_inspect_digest(args, config)
+        if args.command == "generate-hmac-key":
+            return command_generate_hmac_key(args, config)
+        if args.command == "protect-digest":
+            return command_protect_digest(args, config)
+        if args.command == "protect-digests":
+            return command_protect_digests(args, config)
+        if args.command == "verify-auth-record":
+            return command_verify_auth_record(args, config)
+        if args.command == "inspect-auth-record":
+            return command_inspect_auth_record(args, config)
     except (
+        AuthenticationRecordError,
+        CanonicalizationError,
         ConfigurationError,
         DeviceSelectionError,
         DigestError,
@@ -1182,6 +1395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         FeatureAlignmentError,
         FeatureFusionError,
         FFmpegToolError,
+        HMACAuthenticationError,
         NormalizationError,
         QuantizationError,
         SegmentAggregationError,

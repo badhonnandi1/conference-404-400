@@ -19,6 +19,8 @@ data/features/normalized/
 data/features/resnet/_model_cache/
 data/calibration/
 data/digests/
+data/authentication_records/
+data/secrets/
 data/tmp/*
 
 *.ckpt

@@ -44,6 +44,8 @@ class PathsConfig:
     normalized_features: Path
     calibration: Path
     digests: Path
+    authentication_records: Path
+    local_secrets: Path
     logs: Path
 
 
@@ -97,9 +99,22 @@ class QuantizationConfig:
 
 
 @dataclass(frozen=True)
+class HMACConfig:
+    """Configuration for HMAC-protected authentication records."""
+
+    algorithm: str
+    digest: str
+    minimum_key_bytes: int
+    schema_version: int
+    timestamp_unit: str
+    key_environment_variable: str
+
+
+@dataclass(frozen=True)
 class AuthenticationConfig:
     """Authentication-stage configuration values."""
 
+    hmac: HMACConfig
     quantization: QuantizationConfig
 
 
@@ -172,6 +187,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     resnet = _require_mapping(features.get("resnet", {}), "features.resnet")
     temporal = _require_mapping(features.get("temporal", {}), "features.temporal")
     authentication = _require_mapping(config.get("authentication", {}), "authentication")
+    hmac_config = _require_mapping(authentication.get("hmac", {}), "authentication.hmac")
     quantization = _require_mapping(authentication.get("quantization", {}), "authentication.quantization")
     quant_resnet = _require_mapping(quantization.get("resnet", {}), "authentication.quantization.resnet")
     quant_temporal = _require_mapping(
@@ -256,6 +272,30 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     if not isinstance(gray_codes, dict):
         raise ConfigurationError("authentication.quantization.temporal.gray_codes must be a mapping.")
 
+    hmac_algorithm = str(hmac_config.get("algorithm", "HMAC-SHA-256"))
+    hmac_digest = str(hmac_config.get("digest", "sha256")).lower()
+    timestamp_unit = str(hmac_config.get("timestamp_unit", "microseconds")).lower()
+    key_environment_variable = str(
+        hmac_config.get("key_environment_variable", "VIDEO_AUTH_HMAC_KEY_HEX")
+    )
+    try:
+        minimum_key_bytes = int(hmac_config.get("minimum_key_bytes", 32))
+        hmac_schema_version = int(hmac_config.get("schema_version", 1))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("HMAC minimum key bytes and schema version must be integers.") from exc
+    if hmac_algorithm != "HMAC-SHA-256":
+        raise ConfigurationError("Phase 6 supports only authentication.hmac.algorithm='HMAC-SHA-256'.")
+    if hmac_digest != "sha256":
+        raise ConfigurationError("Phase 6 supports only authentication.hmac.digest='sha256'.")
+    if minimum_key_bytes < 32:
+        raise ConfigurationError("authentication.hmac.minimum_key_bytes must be at least 32.")
+    if hmac_schema_version < 1:
+        raise ConfigurationError("authentication.hmac.schema_version must be positive.")
+    if timestamp_unit != "microseconds":
+        raise ConfigurationError("Phase 6 requires authentication.hmac.timestamp_unit='microseconds'.")
+    if not key_environment_variable:
+        raise ConfigurationError("authentication.hmac.key_environment_variable must not be empty.")
+
     try:
         paths_config = PathsConfig(
             originals=_resolve_project_path(project_root, str(paths["originals"])),
@@ -276,6 +316,11 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
                 project_root, str(paths.get("calibration", "data/calibration"))
             ),
             digests=_resolve_project_path(project_root, str(paths.get("digests", "data/digests"))),
+            authentication_records=_resolve_project_path(
+                project_root,
+                str(paths.get("authentication_records", "data/authentication_records")),
+            ),
+            local_secrets=_resolve_project_path(project_root, str(paths.get("local_secrets", "data/secrets"))),
             logs=_resolve_project_path(project_root, str(paths["logs"])),
         )
     except KeyError as exc:
@@ -312,6 +357,14 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             ),
         ),
         authentication=AuthenticationConfig(
+            hmac=HMACConfig(
+                algorithm=hmac_algorithm,
+                digest=hmac_digest,
+                minimum_key_bytes=minimum_key_bytes,
+                schema_version=hmac_schema_version,
+                timestamp_unit=timestamp_unit,
+                key_environment_variable=key_environment_variable,
+            ),
             quantization=QuantizationConfig(
                 version=quantization_version,
                 resnet=QuantizationStreamConfig(
@@ -385,6 +438,8 @@ def ensure_output_directories(config: AppConfig) -> None:
         config.paths.normalized_features,
         config.paths.calibration,
         config.paths.digests,
+        config.paths.authentication_records,
+        config.paths.local_secrets,
         config.paths.logs,
     ):
         path.mkdir(parents=True, exist_ok=True)

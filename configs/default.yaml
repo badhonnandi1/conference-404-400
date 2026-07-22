@@ -1,0 +1,19 @@
+project:
+  name: video-authentication
+  random_seed: 42
+
+video:
+  segment_duration_seconds: 5
+  sample_frames_per_second: 1
+  incomplete_segment_policy: discard
+
+paths:
+  originals: data/originals
+  segments: data/segments
+  sampled_frames: data/sampled_frames
+  metadata: data/metadata
+  manifests: data/manifests
+  logs: logs
+
+logging:
+  level: INFO

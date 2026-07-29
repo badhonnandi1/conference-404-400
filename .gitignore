@@ -8,6 +8,7 @@ htmlcov/
 logs/*.log
 
 data/originals/*
+data/versions/*
 data/segments/*
 data/sampled_frames/*
 data/metadata/*.json
@@ -22,6 +23,7 @@ data/digests/
 data/authentication_records/
 data/secrets/
 data/comparisons/
+data/reports/*
 data/tmp/*
 
 *.ckpt

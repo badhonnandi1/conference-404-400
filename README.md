@@ -189,6 +189,37 @@ Defaults:
 - Temporary diagnostic comparison weights: ResNet `0.5`, temporal `0.5`.
 - Segment comparison alignment: strict segment-ID alignment with `1000` microseconds timestamp tolerance.
 
+## Versions Evaluation Workflow
+
+`scripts/run_versions_evaluation.py` runs a resource-controlled diagnostic evaluation for videos found under
+`data/versions/`. It discovers supported `.mp4`, `.avi`, `.mov`, and `.mkv` files, maps filename-derived expected
+labels, processes `original.mp4` first as `VER_ORIGINAL`, then runs the existing Phase 1-7 CLI pipeline sequentially
+for each variant.
+
+The workflow uses `configs/versions_evaluation.yaml`, which pins ResNet extraction to CPU, lowers the ResNet batch
+size, and performs strict segment timestamp comparison with zero microsecond tolerance. Heavy commands are launched
+sequentially with two CPU threads and reduced scheduling priority.
+
+Run discovery only:
+
+```bash
+.venv/bin/python scripts/run_versions_evaluation.py --discover-only
+```
+
+Run or resume the full diagnostic workflow:
+
+```bash
+.venv/bin/python scripts/run_versions_evaluation.py --resume
+```
+
+Outputs are written under `data/reports/versions_evaluation/`, including `video_registry.csv`,
+`provisional_thresholds.json`, tidy CSV tables, PNG figures, `versions_evaluation_report.html`, and
+`versions_evaluation_summary.json`.
+
+Important limitation: the frozen development normalization and quantization artifacts used by this workflow were
+originally fitted on V001-V003. This workflow is an engineering diagnostic and must not be used to claim final
+research accuracy or final tamper-detection thresholds.
+
 ## CLI Commands
 
 Run commands from the `video-authentication/` directory.

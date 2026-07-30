@@ -8,6 +8,7 @@ htmlcov/
 logs/*.log
 
 data/originals/*
+data/Dataset/*
 data/versions/*
 data/segments/*
 data/sampled_frames/*

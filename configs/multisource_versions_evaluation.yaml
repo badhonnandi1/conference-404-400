@@ -1,0 +1,87 @@
+project:
+  name: video-authentication
+  random_seed: 42
+
+video:
+  segment_duration_seconds: 5
+  sample_frames_per_second: 1
+  incomplete_segment_policy: discard
+
+features:
+  resnet:
+    architecture: resnet18
+    weights: DEFAULT
+    embedding_dimension: 512
+    batch_size: 2
+    normalize_frame_embeddings: true
+    segment_aggregation:
+      - mean
+      - standard_deviation
+    device: cpu
+  temporal:
+    sample_fps: 4
+    frame_width: 224
+    frame_height: 224
+    grayscale: true
+    gaussian_blur_kernel: 3
+    changed_pixel_threshold: 20
+    segment_aggregation:
+      - mean
+      - standard_deviation
+      - maximum
+
+authentication:
+  hmac:
+    algorithm: HMAC-SHA-256
+    digest: sha256
+    minimum_key_bytes: 32
+    schema_version: 1
+    timestamp_unit: microseconds
+    key_environment_variable: VIDEO_AUTH_HMAC_KEY_HEX
+  quantization:
+    version: dev_quantizer_v1
+    resnet:
+      method: median_binary
+      threshold_source: normalized_calibration_median
+      bits_per_feature: 1
+    temporal:
+      method: quartile_gray_code
+      bits_per_feature: 2
+      gray_codes:
+        bin_0: "00"
+        bin_1: "01"
+        bin_2: "11"
+        bin_3: "10"
+    bit_order: big
+    pack_bits: true
+
+verification:
+  comparison:
+    resnet_bit_length: 1024
+    temporal_bit_length: 36
+    hybrid_bit_length: 1060
+    diagnostic_weights:
+      resnet: 0.5
+      temporal: 0.5
+    tie_tolerance: 1.0e-9
+    segment_alignment: strict
+    timestamp_tolerance_microseconds: 0
+
+paths:
+  originals: data/originals
+  segments: data/segments
+  sampled_frames: data/sampled_frames
+  metadata: data/metadata
+  manifests: data/manifests
+  resnet_features: data/features/resnet
+  temporal_features: data/features/temporal
+  normalized_features: data/features/normalized
+  calibration: data/calibration
+  digests: data/digests
+  authentication_records: data/authentication_records
+  local_secrets: data/secrets
+  comparisons: data/comparisons
+  logs: logs
+
+logging:
+  level: INFO

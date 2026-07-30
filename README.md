@@ -220,6 +220,48 @@ Important limitation: the frozen development normalization and quantization arti
 originally fitted on V001-V003. This workflow is an engineering diagnostic and must not be used to claim final
 research accuracy or final tamper-detection thresholds.
 
+## Multi-Source Versions Evaluation Workflow
+
+`scripts/run_multisource_versions_evaluation.py` runs the same Phase 1-7 authentication pipeline across multiple
+source folders, such as `data/Dataset/vid01` through `data/Dataset/vid06`. Each source folder must contain one
+source-local original, plus benign and tampered variants. The workflow compares every variant only against the
+original from the same source folder, creates HMAC-protected records only for source originals, and excludes the
+old V001-V003 and `VER_ORIGINAL` single-source identifiers from the multi-source metrics.
+
+The workflow uses `configs/multisource_versions_evaluation.yaml`, pins feature extraction to CPU, caps CLI stage
+threading at two compute threads, processes videos sequentially, and logs runtime/resource snapshots to
+`runtime_log.csv`.
+
+Run discovery only:
+
+```bash
+.venv/bin/python scripts/run_multisource_versions_evaluation.py \
+  --input-root data/Dataset \
+  --output-dir data/reports/multisource_versions_evaluation \
+  --discover-only
+```
+
+Run or resume the full multi-source diagnostic workflow:
+
+```bash
+.venv/bin/python scripts/run_multisource_versions_evaluation.py \
+  --input-root data/Dataset \
+  --output-dir data/reports/multisource_versions_evaluation \
+  --resume \
+  --cpu-threads 2 \
+  --sleep-profile conservative \
+  --continue-on-error
+```
+
+Outputs are written under `data/reports/multisource_versions_evaluation/`, including source and video registries,
+pipeline status tables, SHA-256 baselines, leave-one-source-out threshold tables, diagnostic predictions,
+per-source/per-transformation metrics, failure tables, PNG figures, `multisource_versions_evaluation_report.html`,
+and `multisource_versions_evaluation_summary.json`.
+
+Important limitation: LOSO thresholds are fit from benign variants only and are diagnostic. The frozen development
+normalization and quantization artifacts still come from V001-V003, so these outputs are engineering evidence, not
+final held-out research claims.
+
 ## CLI Commands
 
 Run commands from the `video-authentication/` directory.

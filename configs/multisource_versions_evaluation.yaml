@@ -29,6 +29,22 @@ features:
       - mean
       - standard_deviation
       - maximum
+  spatial_quality:
+    frame_width: 224
+    frame_height: 224
+    grayscale: true
+    metrics:
+      - variance_laplacian
+      - tenengrad_sharpness
+      - edge_density
+      - high_frequency_dct_energy_ratio
+      - local_contrast
+    segment_aggregation:
+      - mean
+      - standard_deviation
+      - minimum
+      - p10
+      - median
 
 authentication:
   hmac:

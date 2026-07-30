@@ -464,7 +464,7 @@ def classify_transformation(path: Path) -> tuple[str, str, str, str, float]:
     candidates: list[tuple[str, str, str, str, float]] = []
     if re.search(r"blur|blurr|blurred|fblurred", name):
         candidates.append(("tampered", "abnormal", "blur", "filename_pattern_blur", 0.95))
-    if re.search(r"delete|deletion|fdelete|frame_del|(^|[_-])del($|[_-])", name):
+    if re.search(r"delete|deletion|fdelete|frame_del|(^|[_-])del($|[_.-])", name) or stem in {"del", "fdel"}:
         candidates.append(("tampered", "abnormal", "frame_deletion", "filename_pattern_delete", 0.95))
     if re.search(r"insert|insertion|nsert|fiinsert", name):
         candidates.append(("tampered", "abnormal", "frame_insertion", "filename_pattern_insert", 0.95))

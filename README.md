@@ -19,6 +19,11 @@ Implemented in this phase:
 - Interpretable frame-to-frame temporal difference features.
 - Segment-level temporal mean, standard-deviation, and maximum aggregation.
 - Segment-level ResNet/temporal feature alignment.
+- Blur-aware spatial quality feature extraction using Laplacian variance, Tenengrad sharpness, edge density,
+  high-frequency DCT energy ratio, and local contrast.
+- V2 three-stream digest construction for ResNet, temporal, and spatial-quality streams.
+- Leakage-checked six-source blur-aware evaluation script with outer leave-one-source-out folds and inner
+  source-wise parameter selection.
 - Stream-specific robust median/IQR normalization.
 - Development calibration artifact creation and inspection.
 - Normalized ResNet, temporal, and combined feature outputs.
@@ -45,9 +50,8 @@ Not implemented yet:
 - Video compression variants.
 - Tampered-video generation.
 - Perceptual hashes or SHA-256 baselines.
-- Acceptance thresholds or final verification decisions.
-- Segment-level tamper decisions.
-- Augmentation, metrics, ROC curves, plots, or web interfaces.
+- Universal cross-dataset generalization claims.
+- Production deployment hardening.
 
 ## Environment Setup
 
@@ -173,6 +177,9 @@ Defaults:
 - Temporal sampling rate: `4` frames per second.
 - Temporal preprocessing: grayscale, resize to `224x224`, `3x3` Gaussian blur, float32 `[0, 1]`.
 - Temporal segment vector: `18` values from six pair features aggregated by mean, population standard deviation, and maximum.
+- Spatial-quality preprocessing: grayscale, resize to `224x224`, deterministic float32 `[0, 1]`.
+- Spatial-quality segment vector: `25` values from five blur-aware frame metrics aggregated by mean, population
+  standard deviation, minimum, 10th percentile, and median.
 - Normalized feature output path: `data/features/normalized`.
 - Development calibration path: `data/calibration`.
 - Digest output path: `data/digests`.
@@ -180,6 +187,7 @@ Defaults:
 - ResNet quantization: one bit per normalized feature.
 - Temporal quantization: four bins with two-bit Gray code.
 - Hybrid digest length: `1060` bits.
+- Blur-aware V2 digest length: ResNet `1024` bits, temporal `36` bits, spatial `50` bits, hybrid `1110` bits.
 - HMAC algorithm: `HMAC-SHA-256`.
 - HMAC key environment variable: `VIDEO_AUTH_HMAC_KEY_HEX`.
 - Authentication-record output path: `data/authentication_records`.

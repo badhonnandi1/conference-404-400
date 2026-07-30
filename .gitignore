@@ -9,6 +9,7 @@ logs/*.log
 
 data/originals/*
 data/Dataset/*
+data/Dataset -this is the final/*
 data/versions/*
 data/segments/*
 data/sampled_frames/*

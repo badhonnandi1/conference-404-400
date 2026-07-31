@@ -1,4 +1,3 @@
-"""Tests for temporal feature storage and cache helpers."""
 
 from __future__ import annotations
 
@@ -78,7 +77,6 @@ def _result() -> TemporalFeatureResult:
 
 
 def test_temporal_npz_and_manifest_serialization(tmp_path: Path) -> None:
-    """Temporal feature arrays and manifests are serializable."""
 
     paths = temporal_output_paths(tmp_path / "temporal", "T001")
     result = _result()
@@ -111,7 +109,6 @@ def test_temporal_npz_and_manifest_serialization(tmp_path: Path) -> None:
 
 
 def test_temporal_cache_matching() -> None:
-    """Temporal cache matching uses source and preprocessing configuration."""
 
     config = TemporalSamplingConfig(sample_fps=4, frame_width=224, frame_height=224)
     cache_key = build_temporal_cache_key("video-sha", "segment-sha", config)

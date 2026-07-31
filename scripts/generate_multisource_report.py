@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate figures and HTML for the multi-source versions evaluation."""
 
 from __future__ import annotations
 

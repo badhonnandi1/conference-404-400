@@ -1,4 +1,3 @@
-"""Storage, cache, and verification helpers for HMAC-protected digest records."""
 
 from __future__ import annotations
 

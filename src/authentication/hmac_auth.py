@@ -1,4 +1,3 @@
-"""HMAC-SHA-256 key handling, tag generation, and constant-time verification."""
 
 from __future__ import annotations
 
@@ -18,12 +17,10 @@ DEFAULT_MINIMUM_KEY_BYTES = 32
 
 
 class HMACAuthenticationError(RuntimeError):
-    """Raised when HMAC generation, verification, or key handling fails."""
 
 
 @dataclass(frozen=True)
 class HMACKeyInfo:
-    """Loaded HMAC key material plus non-secret identifying metadata."""
 
     key: bytes
     key_id: str
@@ -43,13 +40,11 @@ class HMACKeyInfo:
 
 
 def key_fingerprint(key: bytes) -> str:
-    """Return a non-secret truncated SHA-256 fingerprint for key identification."""
 
     return hashlib.sha256(key).hexdigest()[:16]
 
 
 def decode_hex_key(hex_value: str, minimum_key_bytes: int = DEFAULT_MINIMUM_KEY_BYTES) -> bytes:
-    """Decode and validate a hexadecimal HMAC key."""
 
     cleaned = hex_value.strip()
     if not cleaned:

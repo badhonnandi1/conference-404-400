@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run a resource-controlled multi-source versions evaluation."""
 
 from __future__ import annotations
 
@@ -84,7 +83,6 @@ RUNTIME_COLUMNS = [
 
 
 class EvaluationError(RuntimeError):
-    """Raised when the multi-source evaluation cannot safely continue."""
 
 
 def utc_now() -> str:

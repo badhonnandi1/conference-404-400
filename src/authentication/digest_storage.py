@@ -1,4 +1,3 @@
-"""Storage and cache helpers for quantization artifacts and binary digests."""
 
 from __future__ import annotations
 
@@ -36,7 +35,6 @@ PADDING_POLICY = "zero_pad_to_full_byte"
 
 @dataclass(frozen=True)
 class QuantizationArtifactPaths:
-    """Output paths for a quantization artifact."""
 
     output_dir: Path
     npz_path: Path
@@ -45,7 +43,6 @@ class QuantizationArtifactPaths:
 
 @dataclass(frozen=True)
 class LoadedQuantizationArtifact:
-    """Loaded quantizer parameters and metadata."""
 
     quantization_id: str
     parameters: QuantizationParameters

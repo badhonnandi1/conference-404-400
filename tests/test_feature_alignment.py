@@ -1,4 +1,3 @@
-"""Tests for segment-level feature stream alignment."""
 
 from __future__ import annotations
 

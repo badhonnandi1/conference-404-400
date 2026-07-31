@@ -1,4 +1,3 @@
-"""Tests for dense temporal sampling helpers."""
 
 from __future__ import annotations
 
@@ -14,7 +13,6 @@ from src.features.temporal_features import build_temporal_pairs_for_segment
 
 
 def test_temporal_timestamp_generation_for_five_second_segment() -> None:
-    """A five-second segment at 4 FPS yields 20 deterministic midpoint timestamps."""
 
     timestamps = generate_temporal_timestamps(0.0, 5.0, sample_fps=4)
 
@@ -26,7 +24,6 @@ def test_temporal_timestamp_generation_for_five_second_segment() -> None:
 
 
 def test_temporal_pair_creation_stays_within_segment() -> None:
-    """Twenty temporal frames produce nineteen pairs inside a single segment."""
 
     frames = [
         TemporalFrameRecord(
@@ -52,7 +49,6 @@ def test_temporal_pair_creation_stays_within_segment() -> None:
 
 
 def test_temporal_preprocessing_shape_and_range() -> None:
-    """Decoded frames are converted to normalized fixed-size arrays."""
 
     frame = np.zeros((16, 12, 3), dtype=np.uint8)
     frame[:, :, 1] = 255

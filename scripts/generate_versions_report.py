@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate figures and a self-contained HTML report for the versions evaluation."""
 
 from __future__ import annotations
 

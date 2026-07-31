@@ -1,4 +1,3 @@
-"""Entry point for the video authentication preprocessing CLI."""
 
 from __future__ import annotations
 

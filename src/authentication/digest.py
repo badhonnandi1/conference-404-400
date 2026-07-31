@@ -94,7 +94,6 @@ def pack_bit_matrix(bits: np.ndarray, bit_order: str = "big") -> tuple[np.ndarra
 
 
 def unpack_packed_bits(packed: np.ndarray, bit_length: int, bit_order: str = "big") -> np.ndarray:
-    """Unpack row-wise packed bytes and remove padding bits."""
 
     if bit_order not in {"big", "little"}:
         raise DigestError("bit_order must be 'big' or 'little'.")

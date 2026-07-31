@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import math
+
 import numpy as np
 
 from src.authentication.blur_aware_v2 import (
@@ -129,3 +132,54 @@ def test_v2_hmac_record_verifies_and_detects_payload_changes() -> None:
     assert verify_v2_authentication_record(record, key_info)["record_valid"]
     record["payload"]["video_id"] = "OTHER"
     assert not verify_v2_authentication_record(record, key_info)["record_valid"]
+
+
+def test_v2_hmac_rejects_reference_integrity_and_malformed_record_changes() -> None:
+    bundle = _bundle("VID", offset=0.0)
+    key = bytes.fromhex("12" * 32)
+    key_info = HMACKeyInfo(
+        key=key,
+        key_id="TEST_KEY",
+        source_type="test",
+        key_length_bytes=len(key),
+        key_fingerprint=key_fingerprint(key),
+    )
+    wrong_key = bytes.fromhex("34" * 32)
+    wrong_key_info = HMACKeyInfo(
+        key=wrong_key,
+        key_id="WRONG_KEY",
+        source_type="test",
+        key_length_bytes=len(wrong_key),
+        key_fingerprint=key_fingerprint(wrong_key),
+    )
+    payload = v2_digest_payload(
+        bundle=bundle,
+        normalization_id="N2",
+        quantization_id="Q2",
+        source_video_sha256="abc",
+    )
+    record = build_v2_authentication_record(payload, key_info)
+
+    assert not verify_v2_authentication_record(record, wrong_key_info)["record_valid"]
+
+    modified_tag = copy.deepcopy(record)
+    modified_tag["authentication"]["tag_hex"] = "00" * 32
+    assert not verify_v2_authentication_record(modified_tag, key_info)["record_valid"]
+
+    modified_timestamp = copy.deepcopy(record)
+    modified_timestamp["payload"]["segments"][0]["end_time_microseconds"] += 1
+    assert not verify_v2_authentication_record(modified_timestamp, key_info)["record_valid"]
+
+    reordered_segments = copy.deepcopy(record)
+    reordered_segments["payload"]["segments"].reverse()
+    assert not verify_v2_authentication_record(reordered_segments, key_info)["record_valid"]
+
+    invalid_schema = copy.deepcopy(record)
+    invalid_schema["payload"]["schema_version"] = 999
+    assert not verify_v2_authentication_record(invalid_schema, key_info)["record_valid"]
+
+    malformed_payload = copy.deepcopy(record)
+    malformed_payload["payload"]["non_finite"] = math.nan
+    result = verify_v2_authentication_record(malformed_payload, key_info)
+    assert not result["record_valid"]
+    assert "malformed canonical payload" in result["failure_reason"]

@@ -1,4 +1,3 @@
-"""Blur-aware V2 digest, comparison, and HMAC helpers."""
 
 from __future__ import annotations
 
@@ -592,19 +591,51 @@ def build_v2_authentication_record(payload: dict[str, Any], key_info: HMACKeyInf
 def verify_v2_authentication_record(record: dict[str, Any], key_info: HMACKeyInfo) -> dict[str, Any]:
     """Verify a V2 authentication record and return JSON-friendly flags."""
 
+    checked_at = datetime.now(timezone.utc).isoformat()
     payload = record.get("payload")
     authentication = record.get("authentication")
     if not isinstance(payload, dict) or not isinstance(authentication, dict):
-        return {"record_valid": False, "failure_reason": "missing payload or authentication object"}
-    schema_valid = int(payload.get("schema_version", -1)) == V2_SCHEMA_VERSION and int(authentication.get("record_schema_version", -1)) == V2_SCHEMA_VERSION
-    algorithm_supported = authentication.get("algorithm") == DEFAULT_ALGORITHM
-    payload_checksum_valid = canonical_payload_sha256(payload) == authentication.get("canonical_payload_sha256")
-    key_fingerprint_match = authentication.get("key_fingerprint") == key_info.key_fingerprint
-    hmac_valid = algorithm_supported and verify_hmac_sha256_hex(
-        key_info.key,
-        canonical_json_bytes(payload),
-        str(authentication.get("tag_hex", "")),
-    )
+        return {
+            "record_valid": False,
+            "hmac_valid": False,
+            "payload_checksum_valid": False,
+            "key_fingerprint_match": False,
+            "schema_valid": False,
+            "algorithm_supported": False,
+            "video_id": payload.get("video_id") if isinstance(payload, dict) else None,
+            "key_id": authentication.get("key_id") if isinstance(authentication, dict) else None,
+            "failure_reason": "missing payload or authentication object",
+            "verification_timestamp": checked_at,
+        }
+    try:
+        schema_valid = (
+            int(payload.get("schema_version", -1)) == V2_SCHEMA_VERSION
+            and int(authentication.get("record_schema_version", -1)) == V2_SCHEMA_VERSION
+        )
+        algorithm_supported = authentication.get("algorithm") == DEFAULT_ALGORITHM
+        payload_bytes = canonical_json_bytes(payload)
+        payload_checksum_valid = (
+            canonical_payload_sha256(payload) == authentication.get("canonical_payload_sha256")
+        )
+        key_fingerprint_match = authentication.get("key_fingerprint") == key_info.key_fingerprint
+        hmac_valid = algorithm_supported and verify_hmac_sha256_hex(
+            key_info.key,
+            payload_bytes,
+            str(authentication.get("tag_hex", "")),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        return {
+            "record_valid": False,
+            "hmac_valid": False,
+            "payload_checksum_valid": False,
+            "key_fingerprint_match": False,
+            "schema_valid": False,
+            "algorithm_supported": False,
+            "video_id": payload.get("video_id"),
+            "key_id": authentication.get("key_id"),
+            "failure_reason": f"malformed canonical payload: {exc}",
+            "verification_timestamp": checked_at,
+        }
     failures = []
     if not schema_valid:
         failures.append("schema mismatch")
@@ -626,7 +657,7 @@ def verify_v2_authentication_record(record: dict[str, Any], key_info: HMACKeyInf
         "video_id": payload.get("video_id"),
         "key_id": authentication.get("key_id"),
         "failure_reason": "; ".join(failures) if failures else None,
-        "verification_timestamp": datetime.now(timezone.utc).isoformat(),
+        "verification_timestamp": checked_at,
     }
 
 

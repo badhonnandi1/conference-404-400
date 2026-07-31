@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run the resource-controlled evaluation for videos under data/versions."""
 
 from __future__ import annotations
 
@@ -68,7 +67,6 @@ VIDEO_STAGE_ORDER = ["preprocess", "resnet", "temporal", "normalize", "digest"]
 
 
 class EvaluationError(RuntimeError):
-    """Raised when the versions evaluation cannot safely continue."""
 
 
 def utc_now() -> str:

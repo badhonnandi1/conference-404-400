@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run the blur-aware final six-source evaluation."""
 
 from __future__ import annotations
 
@@ -125,12 +124,10 @@ COMMAND_ENV = {
 
 
 class FinalEvaluationError(RuntimeError):
-    """Raised when the final evaluation cannot proceed safely."""
 
 
 @dataclass(frozen=True)
 class RawFeatureSet:
-    """Aligned raw feature streams for one video."""
 
     video_id: str
     source_id: str
@@ -144,7 +141,6 @@ class RawFeatureSet:
 
 @dataclass(frozen=True)
 class V1DigestBits:
-    """V1 digest bits built from fold-specific normalizers."""
 
     video_id: str
     segment_ids: np.ndarray
@@ -155,7 +151,6 @@ class V1DigestBits:
 
 @dataclass(frozen=True)
 class ThresholdModel:
-    """Segment-level thresholds selected inside a fold."""
 
     score_threshold: float
     blur_loss_threshold: float

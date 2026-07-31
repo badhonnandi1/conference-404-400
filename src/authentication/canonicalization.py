@@ -1,4 +1,3 @@
-"""Canonical authentication payload construction for stored digest records."""
 
 from __future__ import annotations
 

@@ -1,4 +1,3 @@
-"""Command-line interface for the preprocessing foundation."""
 
 from __future__ import annotations
 
@@ -113,7 +112,6 @@ from src.video.segmentation import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the argparse command parser."""
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", type=Path, help="Path to YAML configuration file.")
@@ -502,7 +500,6 @@ def _load_or_create_segments(
 
 
 def run_check_env(config: AppConfig) -> int:
-    """Check required runtime dependencies and print a concise report."""
 
     failures: list[str] = []
     print(f"Python: {platform.python_version()} ({sys.executable})")
@@ -535,7 +532,6 @@ def run_check_env(config: AppConfig) -> int:
 
 
 def run_feature_env(config: AppConfig, requested_device: str | None = None) -> int:
-    """Check torch, torchvision, and feature extraction device support."""
 
     try:
         import torch
@@ -576,7 +572,6 @@ def run_feature_env(config: AppConfig, requested_device: str | None = None) -> i
 
 
 def command_inspect(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle the inspect command."""
 
     video_path = resolve_video_path(args.video, config.project_root)
     video_id = _resolve_video_id(video_path, args.video_id)
@@ -592,7 +587,6 @@ def command_inspect(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_segment(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle the segment command."""
 
     video_path = resolve_video_path(args.video, config.project_root)
     video_id = _resolve_video_id(video_path, args.video_id)
@@ -606,7 +600,6 @@ def command_segment(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_sample(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle the sample command."""
 
     logger = setup_logging(config.paths.logs, config.logging.level, args.verbose)
     video_path = resolve_video_path(args.video, config.project_root)
@@ -634,7 +627,6 @@ def command_sample(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_extract_resnet(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle pretrained ResNet-18 feature extraction."""
 
     logger = setup_logging(config.paths.logs, config.logging.level, args.verbose)
     video_id = safe_video_id(args.video_id)
@@ -771,7 +763,6 @@ def _source_video_for_temporal(args: argparse.Namespace, config: AppConfig, vide
 
 
 def command_extract_temporal(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle temporal consistency feature extraction for one video."""
 
     setup_logging(config.paths.logs, config.logging.level, args.verbose)
     video_id = safe_video_id(args.video_id)
@@ -814,7 +805,6 @@ def command_extract_temporal(args: argparse.Namespace, config: AppConfig) -> int
 
 
 def command_extract_temporal_all(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle temporal extraction for every video in the development registry."""
 
     registry_path = resolve_video_path(args.registry, config.project_root)
     if not registry_path.exists():
@@ -857,7 +847,6 @@ def _safe_video_ids(values: Sequence[str]) -> list[str]:
 
 
 def command_fit_normalization(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle development normalization fitting."""
 
     video_ids = _safe_video_ids(args.video_ids)
     artifact, aligned_sets = fit_and_store_normalization_artifact(
@@ -888,7 +877,6 @@ def command_fit_normalization(args: argparse.Namespace, config: AppConfig) -> in
 
 
 def command_normalize_features(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle normalized feature generation for one video."""
 
     video_id = safe_video_id(args.video_id)
     bundle, manifest, paths, cache_reused = normalize_and_store_features(
@@ -922,7 +910,6 @@ def command_normalize_features(args: argparse.Namespace, config: AppConfig) -> i
 
 
 def command_normalize_features_all(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle normalized feature generation for multiple videos."""
 
     failures = 0
     for video_id in _safe_video_ids(args.video_ids):
@@ -951,7 +938,6 @@ def command_normalize_features_all(args: argparse.Namespace, config: AppConfig) 
 
 
 def command_inspect_normalization(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect a saved normalization artifact."""
 
     artifact = load_normalization_artifact(config.paths.calibration, args.calibration_id)
     print(f"Calibration ID: {artifact.calibration_id}")
@@ -973,7 +959,6 @@ def command_inspect_normalization(args: argparse.Namespace, config: AppConfig) -
 
 
 def command_inspect_normalized_features(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect normalized feature arrays for one video."""
 
     video_id = safe_video_id(args.video_id)
     paths = normalized_output_paths(config.paths.normalized_features, video_id)
@@ -1005,7 +990,6 @@ def command_inspect_normalized_features(args: argparse.Namespace, config: AppCon
 
 
 def command_create_quantizer(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle development quantizer creation."""
 
     artifact = create_and_store_quantizer(
         normalization_root=config.paths.calibration,
@@ -1032,7 +1016,6 @@ def command_create_quantizer(args: argparse.Namespace, config: AppConfig) -> int
 
 
 def command_build_digest(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle digest generation for one video."""
 
     video_id = safe_video_id(args.video_id)
     bundle, manifest, paths, cache_reused = build_and_store_digest(
@@ -1062,7 +1045,6 @@ def command_build_digest(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_build_digests(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle digest generation for multiple videos."""
 
     failures = 0
     for video_id in _safe_video_ids(args.video_ids):
@@ -1091,7 +1073,6 @@ def command_build_digests(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_inspect_quantizer(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect a quantization artifact."""
 
     artifact = load_quantization_artifact(config.paths.calibration, args.quantization_id)
     manifest = artifact.manifest
@@ -1113,7 +1094,6 @@ def command_inspect_quantizer(args: argparse.Namespace, config: AppConfig) -> in
 
 
 def command_inspect_digest(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect one video's digest outputs."""
 
     video_id = safe_video_id(args.video_id)
     paths = digest_output_paths(config.paths.digests, video_id)
@@ -1183,7 +1163,6 @@ def _hmac_key_from_args(args: argparse.Namespace, config: AppConfig):
 
 
 def command_generate_hmac_key(args: argparse.Namespace, config: AppConfig) -> int:
-    """Generate a local development HMAC key file."""
 
     output_path = resolve_video_path(args.output, config.project_root)
     key_info = generate_hmac_key_file(
@@ -1202,7 +1181,6 @@ def command_generate_hmac_key(args: argparse.Namespace, config: AppConfig) -> in
 
 
 def command_protect_digest(args: argparse.Namespace, config: AppConfig) -> int:
-    """Create an HMAC-protected authentication record for one video's digests."""
 
     video_id = safe_video_id(args.video_id)
     key_info = _hmac_key_from_args(args, config)
@@ -1233,7 +1211,6 @@ def command_protect_digest(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_protect_digests(args: argparse.Namespace, config: AppConfig) -> int:
-    """Create HMAC-protected authentication records for multiple videos."""
 
     key_info = _hmac_key_from_args(args, config)
     for video_id in _safe_video_ids(args.video_ids):
@@ -1261,7 +1238,6 @@ def command_protect_digests(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_verify_auth_record(args: argparse.Namespace, config: AppConfig) -> int:
-    """Verify one HMAC-protected authentication record."""
 
     video_id = safe_video_id(args.video_id)
     record_path = (
@@ -1290,7 +1266,6 @@ def command_verify_auth_record(args: argparse.Namespace, config: AppConfig) -> i
 
 
 def command_inspect_auth_record(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect one HMAC-protected authentication record without printing secrets."""
 
     video_id = safe_video_id(args.video_id)
     record_path = (
@@ -1364,7 +1339,6 @@ def _print_stored_comparison_summary(stored) -> None:
 
 
 def command_compare_digests(args: argparse.Namespace, config: AppConfig) -> int:
-    """Compare one reference/query digest pair using segment-level Hamming distances."""
 
     key_info = _hmac_key_from_args(args, config)
     comparison_config = _comparison_config_from_args(args, config)
@@ -1384,7 +1358,6 @@ def command_compare_digests(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def command_compare_digests_batch(args: argparse.Namespace, config: AppConfig) -> int:
-    """Compare one trusted reference against multiple query digests."""
 
     key_info = _hmac_key_from_args(args, config)
     comparison_config = _comparison_config_from_args(args, config)
@@ -1416,7 +1389,6 @@ def command_compare_digests_batch(args: argparse.Namespace, config: AppConfig) -
 
 
 def command_inspect_comparison(args: argparse.Namespace, config: AppConfig) -> int:
-    """Inspect a stored digest-comparison result."""
 
     reference_id = safe_video_id(args.reference_id)
     query_id = safe_video_id(args.query_id)
@@ -1449,7 +1421,6 @@ def command_inspect_comparison(args: argparse.Namespace, config: AppConfig) -> i
 
 
 def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
-    """Handle the complete preprocessing command."""
 
     environment_status = run_check_env(config)
     if environment_status != 0:
@@ -1493,7 +1464,6 @@ def command_preprocess(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the command-line interface."""
 
     parser = build_parser()
     args = parser.parse_args(argv)

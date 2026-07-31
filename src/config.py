@@ -1,4 +1,3 @@
-"""Configuration loading for the video authentication prototype."""
 
 from __future__ import annotations
 
@@ -10,12 +9,10 @@ import yaml
 
 
 class ConfigurationError(ValueError):
-    """Raised when the project configuration is missing or invalid."""
 
 
 @dataclass(frozen=True)
 class ProjectConfig:
-    """Project-level configuration values."""
 
     name: str
     random_seed: int
@@ -23,7 +20,6 @@ class ProjectConfig:
 
 @dataclass(frozen=True)
 class VideoConfig:
-    """Video preprocessing configuration values."""
 
     segment_duration_seconds: float
     sample_frames_per_second: float
@@ -32,7 +28,6 @@ class VideoConfig:
 
 @dataclass(frozen=True)
 class PathsConfig:
-    """Filesystem paths used by the preprocessing stage."""
 
     originals: Path
     segments: Path
@@ -52,14 +47,12 @@ class PathsConfig:
 
 @dataclass(frozen=True)
 class LoggingConfig:
-    """Logging configuration values."""
 
     level: str
 
 
 @dataclass(frozen=True)
 class ResNetFeatureConfig:
-    """Configuration for ResNet frame feature extraction."""
 
     architecture: str
     weights: str

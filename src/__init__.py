@@ -1,4 +1,3 @@
-"""Video authentication research prototype foundation."""
 
 __all__ = ["__version__"]
 

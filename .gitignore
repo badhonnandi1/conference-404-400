@@ -34,3 +34,4 @@ data/tmp/*
 .cache/
 
 .DS_Store
+README.md
